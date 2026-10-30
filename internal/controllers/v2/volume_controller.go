@@ -125,7 +125,9 @@ func (r *VolumeReconciler) Start(ctx context.Context) error {
 	}()
 
 	imageReg, err := r.imageEvents.AddHandler(event.HandlerFunc[*providerapi.Image](func(evt event.Event[*providerapi.Image]) {
-		r.requeueVolumesForImage(ctx, evt.Object.ID)
+		if evt.Type == event.TypeDeleted || (evt.Type == event.TypeUpdated && evt.Object.Status.State != providerapi.ImageStatePending) {
+			r.requeueVolumesForImage(ctx, evt.Object.ID)
+		}
 	}))
 	if err != nil {
 		return err
@@ -135,7 +137,9 @@ func (r *VolumeReconciler) Start(ctx context.Context) error {
 	}()
 
 	osImgEventReg, err := r.osImageEvents.AddHandler(event.HandlerFunc[*providerapi.OSImage](func(evt event.Event[*providerapi.OSImage]) {
-		r.requeueVolumesForOSImage(ctx, evt.Object.ID)
+		if evt.Type == event.TypeDeleted || (evt.Type == event.TypeUpdated && evt.Object.Status.State != providerapi.OSImageStatePending) {
+			r.requeueVolumesForOSImage(ctx, evt.Object.ID)
+		}
 	}))
 	if err != nil {
 		return err
@@ -145,15 +149,9 @@ func (r *VolumeReconciler) Start(ctx context.Context) error {
 	}()
 
 	snapshotReg, err := r.snapshotEvents.AddHandler(event.HandlerFunc[*providerapi.Snapshot](func(evt event.Event[*providerapi.Snapshot]) {
-		if evt.Type != event.TypeUpdated && evt.Type != event.TypeDeleted {
-			return
+		if evt.Type == event.TypeDeleted || (evt.Type == event.TypeUpdated && evt.Object.Status.State != providerapi.SnapshotStatePending) {
+			r.requeueVolumesForSnapshot(ctx, evt.Object.ID)
 		}
-		if evt.Object.Status.State != providerapi.SnapshotStateReady &&
-			evt.Object.Status.State != providerapi.SnapshotStateFailed &&
-			evt.Object.DeletedAt == nil {
-			return
-		}
-		r.requeueVolumesForSnapshot(ctx, evt.Object.ID)
 	}))
 	if err != nil {
 		return err
@@ -403,8 +401,6 @@ func (r *VolumeReconciler) reconcileOSVolume(ctx context.Context, log logr.Logge
 		if !errors.Is(err, store.ErrNotFound) {
 			return fmt.Errorf("failed to get OS image %s: %w", osImageRef, err)
 		}
-
-		// TODO: Create OS image if it does not exist?
 	}
 
 	switch osImage.Status.State {

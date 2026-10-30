@@ -148,8 +148,9 @@ func (r *OSImageReconciler) Start(ctx context.Context) error {
 	}()
 
 	imgEventReg, err := r.imageEvents.AddHandler(event.HandlerFunc[*providerapi.Image](func(evt event.Event[*providerapi.Image]) {
-		// TODO Do we need to requeue on every image event? We should probably filter for specific events, e.g. deletes & state changes.
-		r.requeueOSImagesForImage(ctx, evt.Object.ID)
+		if evt.Type == event.TypeDeleted || (evt.Type == event.TypeUpdated && evt.Object.Status.State != providerapi.ImageStatePending) {
+			r.requeueOSImagesForImage(ctx, evt.Object.ID)
+		}
 	}))
 	if err != nil {
 		return err
@@ -159,8 +160,9 @@ func (r *OSImageReconciler) Start(ctx context.Context) error {
 	}()
 
 	snapEventReg, err := r.snapshotEvents.AddHandler(event.HandlerFunc[*providerapi.Snapshot](func(evt event.Event[*providerapi.Snapshot]) {
-		// TODO Do we need to requeue on every snapshot event? We should probably filter for specific events, e.g. deletes & state changes.
-		r.requeueOSImagesForSnapshot(ctx, evt.Object.ID)
+		if evt.Type == event.TypeDeleted || (evt.Type == event.TypeUpdated && evt.Object.Status.State != providerapi.SnapshotStatePending) {
+			r.requeueOSImagesForSnapshot(ctx, evt.Object.ID)
+		}
 	}))
 	if err != nil {
 		return err
@@ -287,7 +289,6 @@ func (r *OSImageReconciler) reconcileOSImage(ctx context.Context, id string) err
 	baseImageID := imageDigest.Encoded()
 	snapshotID := imageDigest.Encoded()
 
-	log.V(1).Info("Using base image", "imageId", baseImageID, "snapshotId", snapshotID)
 	baseImage, err := r.imageStore.Get(ctx, baseImageID)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {

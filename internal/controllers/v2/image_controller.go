@@ -144,15 +144,9 @@ func (r *ImageReconciler) Start(ctx context.Context) error {
 	}()
 
 	snapEventReg, err := r.snapshotEvents.AddHandler(event.HandlerFunc[*providerapi.Snapshot](func(evt event.Event[*providerapi.Snapshot]) {
-		if evt.Type != event.TypeUpdated && evt.Type != event.TypeDeleted {
-			return
+		if evt.Type == event.TypeDeleted || (evt.Type == event.TypeUpdated && evt.Object.Status.State != providerapi.SnapshotStatePending) {
+			r.requeueImagesForSnapshot(ctx, evt.Object.ID)
 		}
-		if evt.Object.Status.State != providerapi.SnapshotStateReady &&
-			evt.Object.Status.State != providerapi.SnapshotStateFailed &&
-			evt.Object.DeletedAt == nil {
-			return
-		}
-		r.requeueImagesForSnapshot(ctx, evt.Object.ID)
 	}))
 	if err != nil {
 		return err
