@@ -39,7 +39,8 @@ func (s *Server) createVolumeSnapshot(ctx context.Context, log logr.Logger, volu
 			ID: s.idGen.Generate(),
 		},
 		Spec: api.SnapshotSpec{
-			ImageRef: volume.Status.ImageRef,
+			ImageRef:   volume.Status.ImageRef,
+			Protection: api.SnapshotProtectionProtected,
 		},
 	}
 
