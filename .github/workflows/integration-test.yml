@@ -1,6 +1,9 @@
 name: Run integration tests
 
 on:
+  push:
+    branches:
+      - ceph-test-container
   pull_request:
     types: [labeled, synchronize, reopened]
 
@@ -15,7 +18,7 @@ jobs:
         client: [v19.2.7, v20.2.4]
         # Ceph cluster the provider connects to
         cluster: [v19.2.7, v20.2.4]
-    if: contains(github.event.pull_request.labels.*.name, 'integration-tests')
+#    if: contains(github.event.pull_request.labels.*.name, 'integration-tests')
 
     steps:
       - name: Checkout repository
