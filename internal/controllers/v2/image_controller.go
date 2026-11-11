@@ -329,6 +329,23 @@ func (r *ImageReconciler) reconcileImage(ctx context.Context, id string) error {
 		return nil
 	}
 
+	newSize := round.OffBytes(image.Spec.Size)
+	currentSize, err := rbdImage.GetSize()
+	if err != nil {
+		return fmt.Errorf("failed to get current RBD image size: %w", err)
+	}
+	if currentSize != newSize {
+		log.Info("Resizing RBD image", "currentSize", currentSize, "newSize", newSize)
+		if err := rbdImage.Resize(newSize); err != nil {
+			return fmt.Errorf("failed to resize RBD image: %w", err)
+		}
+		image.Status.Size = newSize
+		if _, err := r.imageStore.Update(ctx, image); err != nil {
+			return fmt.Errorf("failed to update image status after resize: %w", err)
+		}
+		return nil
+	}
+
 	metadata, err := rbdImage.ListMetadata()
 	if err != nil {
 		return fmt.Errorf("failed to list image metadata: %w", err)
@@ -363,7 +380,6 @@ func (r *ImageReconciler) reconcileImage(ctx context.Context, id string) error {
 		User:     user,
 		UserKey:  key,
 	}
-	newSize := round.OffBytes(image.Spec.Size)
 
 	needsUpdate := image.Status.State != providerapi.ImageStateAvailable ||
 		image.Status.Size != newSize ||

@@ -301,42 +301,53 @@ func (r *VolumeReconciler) reconcileVolume(ctx context.Context, id string) error
 		}
 	}
 
-	// Image exists, reconcile volume state
+	// Image exists, reconcile its state before syncing the volume.
 	switch img.Status.State {
 	case providerapi.ImageStatePending:
 		log.Info("Image is pending, waiting", "imageId", img.ID)
 		return nil
 	case providerapi.ImageStateAvailable:
-		var desiredAccess *providerapi.VolumeAccess
-		if img.Status.Access != nil {
-			desiredAccess = &providerapi.VolumeAccess{
-				Monitors: img.Status.Access.Monitors,
-				Handle:   img.Status.Access.Handle,
-				WWN:      img.Spec.WWN,
-				User:     img.Status.Access.User,
-				UserKey:  img.Status.Access.UserKey,
-			}
-		}
-		needsUpdate := volume.Status.State != providerapi.VolumeStateAvailable ||
-			volume.Status.Size != img.Status.Size ||
-			!volumeAccessEqual(volume.Status.Access, desiredAccess)
-
-		if !needsUpdate {
-			log.V(1).Info("Volume is up to date, nothing to do")
-			return nil
-		}
-
-		log.Info("Image is available, updating volume status", "imageId", img.ID)
-		volume.Status.State = providerapi.VolumeStateAvailable
-		volume.Status.Size = img.Status.Size
-		volume.Status.Access = desiredAccess
-		if _, err := r.volumeStore.Update(ctx, volume); err != nil {
-			return fmt.Errorf("failed to update volume status: %w", err)
-		}
-		return nil
+		log.V(1).Info("Image is available", "imageId", img.ID)
 	default:
 		return fmt.Errorf("image %s in unexpected state: %s", img.ID, img.Status.State)
 	}
+
+	// Reconcile mutable image spec fields (e.g. size) from the volume spec.
+	if changed, err := r.syncImageSpec(ctx, volume, img); err != nil {
+		return err
+	} else if changed {
+		log.Info("Updated image spec from volume spec", "imageId", img.ID)
+		return nil
+	}
+
+	// Reconcile volume status from the settled image status.
+	var desiredAccess *providerapi.VolumeAccess
+	if img.Status.Access != nil {
+		desiredAccess = &providerapi.VolumeAccess{
+			Monitors: img.Status.Access.Monitors,
+			Handle:   img.Status.Access.Handle,
+			WWN:      img.Spec.WWN,
+			User:     img.Status.Access.User,
+			UserKey:  img.Status.Access.UserKey,
+		}
+	}
+	needsUpdate := volume.Status.State != providerapi.VolumeStateAvailable ||
+		volume.Status.Size != img.Status.Size ||
+		!volumeAccessEqual(volume.Status.Access, desiredAccess)
+
+	if !needsUpdate {
+		log.V(1).Info("Volume is up to date, nothing to do")
+		return nil
+	}
+
+	log.Info("Image is available, updating volume status", "imageId", img.ID)
+	volume.Status.State = providerapi.VolumeStateAvailable
+	volume.Status.Size = img.Status.Size
+	volume.Status.Access = desiredAccess
+	if _, err := r.volumeStore.Update(ctx, volume); err != nil {
+		return fmt.Errorf("failed to update volume status: %w", err)
+	}
+	return nil
 }
 
 func (r *VolumeReconciler) setVolumeImageRef(ctx context.Context, volume *providerapi.Volume, imageID string) error {
@@ -348,6 +359,24 @@ func (r *VolumeReconciler) setVolumeImageRef(ctx context.Context, volume *provid
 		return fmt.Errorf("failed to update volume with image ref: %w", err)
 	}
 	return nil
+}
+
+// syncImageSpec updates the image spec to match the volume's desired state for
+// the fields that can change after creation. It returns true if the image was updated.
+func (r *VolumeReconciler) syncImageSpec(ctx context.Context, volume *providerapi.Volume, img *providerapi.Image) (bool, error) {
+	changed := false
+	if img.Spec.Size != volume.Spec.Size {
+		img.Spec.Size = volume.Spec.Size
+		changed = true
+	}
+
+	if !changed {
+		return false, nil
+	}
+	if _, err := r.imageStore.Update(ctx, img); err != nil {
+		return false, fmt.Errorf("failed to update image spec: %w", err)
+	}
+	return true, nil
 }
 
 func volumeImageID(volume *providerapi.Volume) string {
