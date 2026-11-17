@@ -81,11 +81,11 @@ vet: ## Run go vet against code.
 
 .PHONY: test
 test: manifests generate fmt vet envtest check-license ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go run github.com/onsi/ginkgo/v2/ginkgo --label-filter="!integration" -coverprofile cover.out ./...
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go run github.com/onsi/ginkgo/v2/ginkgo --label-filter="!integration && !integration-v2" -coverprofile cover.out ./...
 
 .PHONY: integration-tests
 integration-tests:
-	CEPH_TEST_CLUSTER_VERSION=$(CEPH_TEST_CLUSTER_VERSION) CGO=1 go run github.com/onsi/ginkgo/v2/ginkgo --label-filter="integration" ./...
+	CEPH_TEST_CLUSTER_VERSION=$(CEPH_TEST_CLUSTER_VERSION) CGO=1 go run github.com/onsi/ginkgo/v2/ginkgo --label-filter="integration-v2" ./...
 
 .PHONY: dev-image
 dev-image: ## Build the image with Go and the Ceph client libraries.
