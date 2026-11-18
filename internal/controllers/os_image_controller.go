@@ -16,7 +16,7 @@ import (
 	"github.com/ceph/go-ceph/rados"
 	librbd "github.com/ceph/go-ceph/rbd"
 	"github.com/go-logr/logr"
-	providerapi "github.com/ironcore-dev/ceph-provider/api/v2"
+	"github.com/ironcore-dev/ceph-provider/api"
 	"github.com/ironcore-dev/ceph-provider/internal/rater"
 	ironcoreimage "github.com/ironcore-dev/ironcore-image"
 	"github.com/ironcore-dev/ironcore-image/oci/image"
@@ -37,12 +37,12 @@ type OSImageReconcilerOptions struct {
 func NewOSImageReconciler(
 	log logr.Logger,
 	conn *rados.Conn,
-	osImageStore store.Store[*providerapi.OSImage],
-	imageStore store.Store[*providerapi.Image],
-	snapshotStore store.Store[*providerapi.Snapshot],
-	osImageEvents event.Source[*providerapi.OSImage],
-	imageEvents event.Source[*providerapi.Image],
-	snapshotEvents event.Source[*providerapi.Snapshot],
+	osImageStore store.Store[*api.OSImage],
+	imageStore store.Store[*api.Image],
+	snapshotStore store.Store[*api.Snapshot],
+	osImageEvents event.Source[*api.OSImage],
+	imageEvents event.Source[*api.Image],
+	snapshotEvents event.Source[*api.Snapshot],
 	opts OSImageReconcilerOptions,
 ) (*OSImageReconciler, error) {
 	if conn == nil {
@@ -117,13 +117,13 @@ type OSImageReconciler struct {
 
 	queue workqueue.TypedRateLimitingInterface[string]
 
-	osImageStore  store.Store[*providerapi.OSImage]
-	imageStore    store.Store[*providerapi.Image]
-	snapshotStore store.Store[*providerapi.Snapshot]
+	osImageStore  store.Store[*api.OSImage]
+	imageStore    store.Store[*api.Image]
+	snapshotStore store.Store[*api.Snapshot]
 
-	osImageEvents  event.Source[*providerapi.OSImage]
-	imageEvents    event.Source[*providerapi.Image]
-	snapshotEvents event.Source[*providerapi.Snapshot]
+	osImageEvents  event.Source[*api.OSImage]
+	imageEvents    event.Source[*api.Image]
+	snapshotEvents event.Source[*api.Snapshot]
 
 	monitors string
 	client   string
@@ -137,7 +137,7 @@ type OSImageReconciler struct {
 func (r *OSImageReconciler) Start(ctx context.Context) error {
 	log := r.log
 
-	osImgEventReg, err := r.osImageEvents.AddHandler(event.HandlerFunc[*providerapi.OSImage](func(evt event.Event[*providerapi.OSImage]) {
+	osImgEventReg, err := r.osImageEvents.AddHandler(event.HandlerFunc[*api.OSImage](func(evt event.Event[*api.OSImage]) {
 		r.queue.Add(evt.Object.ID)
 	}))
 	if err != nil {
@@ -147,8 +147,8 @@ func (r *OSImageReconciler) Start(ctx context.Context) error {
 		_ = r.osImageEvents.RemoveHandler(osImgEventReg)
 	}()
 
-	imgEventReg, err := r.imageEvents.AddHandler(event.HandlerFunc[*providerapi.Image](func(evt event.Event[*providerapi.Image]) {
-		if evt.Type == event.TypeDeleted || (evt.Type == event.TypeUpdated && evt.Object.Status.State != providerapi.ImageStatePending) {
+	imgEventReg, err := r.imageEvents.AddHandler(event.HandlerFunc[*api.Image](func(evt event.Event[*api.Image]) {
+		if evt.Type == event.TypeDeleted || (evt.Type == event.TypeUpdated && evt.Object.Status.State != api.ImageStatePending) {
 			r.requeueOSImagesForImage(ctx, evt.Object.ID)
 		}
 	}))
@@ -159,8 +159,8 @@ func (r *OSImageReconciler) Start(ctx context.Context) error {
 		_ = r.imageEvents.RemoveHandler(imgEventReg)
 	}()
 
-	snapEventReg, err := r.snapshotEvents.AddHandler(event.HandlerFunc[*providerapi.Snapshot](func(evt event.Event[*providerapi.Snapshot]) {
-		if evt.Type == event.TypeDeleted || (evt.Type == event.TypeUpdated && evt.Object.Status.State != providerapi.SnapshotStatePending) {
+	snapEventReg, err := r.snapshotEvents.AddHandler(event.HandlerFunc[*api.Snapshot](func(evt event.Event[*api.Snapshot]) {
+		if evt.Type == event.TypeDeleted || (evt.Type == event.TypeUpdated && evt.Object.Status.State != api.SnapshotStatePending) {
 			r.requeueOSImagesForSnapshot(ctx, evt.Object.ID)
 		}
 	}))
@@ -191,7 +191,7 @@ func (r *OSImageReconciler) Start(ctx context.Context) error {
 }
 
 func (r *OSImageReconciler) requeueOSImagesForImage(ctx context.Context, imageID string) {
-	osImages, err := r.osImageStore.List(ctx, store.MatchingLabels{providerapi.OSImageBaseImageLabel: imageID})
+	osImages, err := r.osImageStore.List(ctx, store.MatchingLabels{api.OSImageBaseImageLabel: imageID})
 	if err != nil {
 		r.log.Error(err, "failed to list OS images for base image event requeue")
 		return
@@ -202,7 +202,7 @@ func (r *OSImageReconciler) requeueOSImagesForImage(ctx context.Context, imageID
 }
 
 func (r *OSImageReconciler) requeueOSImagesForSnapshot(ctx context.Context, snapshotID string) {
-	osImages, err := r.osImageStore.List(ctx, store.MatchingLabels{providerapi.OSImageSnapshotLabel: snapshotID})
+	osImages, err := r.osImageStore.List(ctx, store.MatchingLabels{api.OSImageSnapshotLabel: snapshotID})
 	if err != nil {
 		r.log.Error(err, "failed to list OS images for snapshot event requeue")
 		return
@@ -265,10 +265,10 @@ func (r *OSImageReconciler) reconcileOSImage(ctx context.Context, id string) err
 	// Determine IDs for the base image and snapshot associated with this OS image.
 	var baseImageID, snapshotID string
 	var ok bool
-	if baseImageID, ok = osImage.Labels[providerapi.OSImageBaseImageLabel]; !ok {
+	if baseImageID, ok = osImage.Labels[api.OSImageBaseImageLabel]; !ok {
 		return fmt.Errorf("OS image %s missing base image label", osImage.ID)
 	}
-	if snapshotID, ok = osImage.Labels[providerapi.OSImageSnapshotLabel]; !ok {
+	if snapshotID, ok = osImage.Labels[api.OSImageSnapshotLabel]; !ok {
 		return fmt.Errorf("OS image %s missing snapshot label", osImage.ID)
 	}
 
@@ -303,19 +303,19 @@ func (r *OSImageReconciler) reconcileOSImage(ctx context.Context, id string) err
 
 		log.V(1).Info("Creating base image", "imageId", baseImageID)
 		imageSize := uint64(ironcoreImage.RootFS.Descriptor().Size)
-		baseImage = &providerapi.Image{
+		baseImage = &api.Image{
 			Metadata: apiutils.Metadata{
 				ID: baseImageID,
 				Annotations: map[string]string{
-					providerapi.OSImageAnnotation: osImage.ID,
+					api.OSImageAnnotation: osImage.ID,
 				},
 			},
-			Spec: providerapi.ImageSpec{
+			Spec: api.ImageSpec{
 				Size:   imageSize,
 				WWN:    "", // Base image doesn't need WWN
-				Limits: providerapi.Limits{},
-				Encryption: providerapi.EncryptionSpec{
-					Type: providerapi.EncryptionTypeUnencrypted, // Base images are unencrypted
+				Limits: api.Limits{},
+				Encryption: api.EncryptionSpec{
+					Type: api.EncryptionTypeUnencrypted, // Base images are unencrypted
 				},
 			},
 		}
@@ -328,10 +328,10 @@ func (r *OSImageReconciler) reconcileOSImage(ctx context.Context, id string) err
 
 	// Step 3: Check base image state
 	switch baseImage.Status.State {
-	case providerapi.ImageStatePending:
+	case api.ImageStatePending:
 		log.Info("Base image is pending, waiting", "imageId", baseImage.ID)
 		return nil
-	case providerapi.ImageStateAvailable:
+	case api.ImageStateAvailable:
 		log.V(1).Info("Base image is available", "imageId", baseImage.ID)
 	default:
 		return fmt.Errorf("base image %s in unexpected state: %s", baseImage.ID, baseImage.Status.State)
@@ -351,16 +351,16 @@ func (r *OSImageReconciler) reconcileOSImage(ctx context.Context, id string) err
 
 		// Create snapshot
 		log.V(1).Info("Creating snapshot of RBD base image", "snapshotId", snapshotID, "imageId", baseImageID)
-		snapshot = &providerapi.Snapshot{
+		snapshot = &api.Snapshot{
 			Metadata: apiutils.Metadata{
 				ID: snapshotID,
 				Annotations: map[string]string{
-					providerapi.OSImageAnnotation: osImage.ID,
+					api.OSImageAnnotation: osImage.ID,
 				},
 			},
-			Spec: providerapi.SnapshotSpec{
+			Spec: api.SnapshotSpec{
 				ImageRef:   baseImageID,
-				Protection: providerapi.SnapshotProtectionProtected, // Protection needed for cloning
+				Protection: api.SnapshotProtectionProtected, // Protection needed for cloning
 			},
 		}
 
@@ -372,12 +372,12 @@ func (r *OSImageReconciler) reconcileOSImage(ctx context.Context, id string) err
 
 	// Step 5: Check snapshot state
 	switch snapshot.Status.State {
-	case providerapi.SnapshotStatePending:
+	case api.SnapshotStatePending:
 		log.Info("Snapshot is pending, waiting", "snapshotId", snapshot.ID)
 		return nil
-	case providerapi.SnapshotStateReady:
+	case api.SnapshotStateReady:
 		log.V(1).Info("Snapshot is ready", "snapshotId", snapshot.ID)
-	case providerapi.SnapshotStateFailed:
+	case api.SnapshotStateFailed:
 		log.Info("Snapshot failed, recreating", "snapshotId", snapshot.ID)
 		if err := r.snapshotStore.Delete(ctx, snapshot.ID); err != nil {
 			if !errors.Is(err, store.ErrNotFound) {
@@ -397,7 +397,7 @@ func (r *OSImageReconciler) reconcileOSImage(ctx context.Context, id string) err
 	} else {
 		snapshotRef = ""
 	}
-	needsUpdate := osImage.Status.State != providerapi.OSImageStateAvailable ||
+	needsUpdate := osImage.Status.State != api.OSImageStateAvailable ||
 		osImage.Status.Size != snapshot.Status.Size ||
 		snapshotRef != snapshot.ID
 
@@ -406,7 +406,7 @@ func (r *OSImageReconciler) reconcileOSImage(ctx context.Context, id string) err
 		return nil
 	}
 
-	osImage.Status.State = providerapi.OSImageStateAvailable
+	osImage.Status.State = api.OSImageStateAvailable
 	osImage.Status.Size = snapshot.Status.Size
 	osImage.Status.SnapshotRef = &snapshot.ID
 
@@ -416,7 +416,7 @@ func (r *OSImageReconciler) reconcileOSImage(ctx context.Context, id string) err
 	return nil
 }
 
-func (r *OSImageReconciler) deleteOSImage(ctx context.Context, log logr.Logger, osImage *providerapi.OSImage) error {
+func (r *OSImageReconciler) deleteOSImage(ctx context.Context, log logr.Logger, osImage *api.OSImage) error {
 	if !slices.Contains(osImage.Finalizers, osImageFinalizer) {
 		log.V(1).Info("OS image has no finalizer: done")
 		return nil
@@ -464,7 +464,7 @@ func (r *OSImageReconciler) deleteOSImage(ctx context.Context, log logr.Logger, 
 }
 
 // TODO: long running operation; move to background worker?
-func (r *OSImageReconciler) populateBaseImage(ctx context.Context, log logr.Logger, baseImage *providerapi.Image, ironcoreImage *ironcoreimage.Image) error {
+func (r *OSImageReconciler) populateBaseImage(ctx context.Context, log logr.Logger, baseImage *api.Image, ironcoreImage *ironcoreimage.Image) error {
 	ioCtx, err := r.conn.OpenIOContext(r.pool)
 	if err != nil {
 		return fmt.Errorf("unable to get RADOS IOContext: %w", err)

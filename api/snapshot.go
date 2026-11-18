@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: SAP SE or an SAP affiliate company and IronCore contributors
+// SPDX-FileCopyrightText: 2023 SAP SE or an SAP affiliate company and IronCore contributors
 // SPDX-License-Identifier: Apache-2.0
 
 package api
@@ -7,30 +7,42 @@ import (
 	apiutils "github.com/ironcore-dev/provider-utils/apiutils/api"
 )
 
+const (
+	SnapshotSpecImageRefField = "spec.imageRef"
+)
+
+func SetupSnapshotSpecImageRefFieldIndexer(snapshot *Snapshot) string {
+	return snapshot.Spec.ImageRef
+}
+
 type Snapshot struct {
 	apiutils.Metadata `json:"metadata,omitempty"`
 
-	Source SnapshotSource `json:"source"`
-
+	Spec   SnapshotSpec   `json:"spec"`
 	Status SnapshotStatus `json:"status"`
+}
+
+type SnapshotProtection string
+
+const (
+	SnapshotProtectionNone      SnapshotProtection = "none"
+	SnapshotProtectionProtected SnapshotProtection = "protected"
+)
+
+type SnapshotSpec struct {
+	ImageRef   string             `json:"imageRef"`
+	Protection SnapshotProtection `json:"protection"`
 }
 
 type SnapshotState string
 
 const (
-	SnapshotStatePending   SnapshotState = "Pending"
-	SnapshotStatePopulated SnapshotState = "Populated"
-	SnapshotStateReady     SnapshotState = "Ready"
-	SnapshotStateFailed    SnapshotState = "Failed"
+	SnapshotStatePending SnapshotState = "Pending"
+	SnapshotStateReady   SnapshotState = "Ready"
+	SnapshotStateFailed  SnapshotState = "Failed"
 )
 
 type SnapshotStatus struct {
-	State  SnapshotState `json:"state"`
-	Digest string        `json:"digest"`
-	Size   int64         `json:"size"`
-}
-
-type SnapshotSource struct {
-	IronCoreImage string `json:"ironcoreImage"`
-	VolumeImageID string `json:"volumeImageId"`
+	State SnapshotState `json:"state"`
+	Size  uint64        `json:"size"`
 }

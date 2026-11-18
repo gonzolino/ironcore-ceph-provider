@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: SAP SE or an SAP affiliate company and IronCore contributors
+// SPDX-FileCopyrightText: 2024 SAP SE or an SAP affiliate company and IronCore contributors
 // SPDX-License-Identifier: Apache-2.0
 
 package controllers
@@ -15,43 +15,35 @@ import (
 
 	"github.com/ceph/go-ceph/rados"
 	librbd "github.com/ceph/go-ceph/rbd"
-	"github.com/containerd/containerd/reference"
 	"github.com/go-logr/logr"
-	providerapi "github.com/ironcore-dev/ceph-provider/api"
+	"github.com/ironcore-dev/ceph-provider/api"
 	"github.com/ironcore-dev/ceph-provider/internal/encryption"
 	"github.com/ironcore-dev/ceph-provider/internal/round"
-	"github.com/ironcore-dev/ceph-provider/internal/utils"
-	"github.com/ironcore-dev/ironcore-image/oci/remote"
-	apiutils "github.com/ironcore-dev/provider-utils/apiutils/api"
 	"github.com/ironcore-dev/provider-utils/eventutils/event"
-	eventrecorder "github.com/ironcore-dev/provider-utils/eventutils/recorder"
 	"github.com/ironcore-dev/provider-utils/storeutils/store"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/utils/ptr"
 )
 
 const (
 	LimitMetadataPrefix = "conf_"
 	WWNKey              = "wwn"
-	imageDigestLabel    = "image-digest"
 )
 
 type ImageReconcilerOptions struct {
-	Monitors   string
-	Client     string
-	Pool       string
-	WorkerSize int
+	Monitors            string
+	Client              string
+	Pool                string
+	PopulatorBufferSize int64
+	WorkerSize          int
 }
 
 func NewImageReconciler(
 	log logr.Logger,
 	conn *rados.Conn,
-	images store.Store[*providerapi.Image],
-	snapshots store.Store[*providerapi.Snapshot],
-	eventRecorder eventrecorder.EventRecorder,
-	imageEvents event.Source[*providerapi.Image],
-	snapshotEvents event.Source[*providerapi.Snapshot],
+	imageStore store.Store[*api.Image],
+	snapshotStore store.Store[*api.Snapshot],
+	imageEvents event.Source[*api.Image],
+	snapshotEvents event.Source[*api.Snapshot],
 	keyEncryption encryption.Encryptor,
 	opts ImageReconcilerOptions,
 ) (*ImageReconciler, error) {
@@ -59,12 +51,12 @@ func NewImageReconciler(
 		return nil, fmt.Errorf("must specify conn")
 	}
 
-	if images == nil {
+	if imageStore == nil {
 		return nil, fmt.Errorf("must specify image store")
 	}
 
-	if snapshots == nil {
-		return nil, fmt.Errorf("must specify snapshots store")
+	if snapshotStore == nil {
+		return nil, fmt.Errorf("must specify snapshot store")
 	}
 
 	if imageEvents == nil {
@@ -91,24 +83,28 @@ func NewImageReconciler(
 		return nil, fmt.Errorf("must specify ceph client")
 	}
 
+	if opts.PopulatorBufferSize == 0 {
+		opts.PopulatorBufferSize = 5 * 1024 * 1024
+	}
+
 	if opts.WorkerSize == 0 {
 		opts.WorkerSize = 15
 	}
 
 	return &ImageReconciler{
-		log:            log,
-		conn:           conn,
-		queue:          workqueue.NewTypedRateLimitingQueue[string](workqueue.DefaultTypedControllerRateLimiter[string]()),
-		images:         images,
-		snapshots:      snapshots,
-		EventRecorder:  eventRecorder,
-		imageEvents:    imageEvents,
-		snapshotEvents: snapshotEvents,
-		monitors:       opts.Monitors,
-		client:         opts.Client,
-		pool:           opts.Pool,
-		keyEncryption:  keyEncryption,
-		workerSize:     opts.WorkerSize,
+		log:                 log,
+		conn:                conn,
+		queue:               workqueue.NewTypedRateLimitingQueue[string](workqueue.DefaultTypedControllerRateLimiter[string]()),
+		imageStore:          imageStore,
+		snapshotStore:       snapshotStore,
+		imageEvents:         imageEvents,
+		snapshotEvents:      snapshotEvents,
+		monitors:            opts.Monitors,
+		client:              opts.Client,
+		pool:                opts.Pool,
+		keyEncryption:       keyEncryption,
+		populatorBufferSize: opts.PopulatorBufferSize,
+		workerSize:          opts.WorkerSize,
 	}, nil
 }
 
@@ -118,18 +114,18 @@ type ImageReconciler struct {
 
 	queue workqueue.TypedRateLimitingInterface[string]
 
-	images    store.Store[*providerapi.Image]
-	snapshots store.Store[*providerapi.Snapshot]
+	imageStore    store.Store[*api.Image]
+	snapshotStore store.Store[*api.Snapshot]
 
-	eventrecorder.EventRecorder
-	imageEvents    event.Source[*providerapi.Image]
-	snapshotEvents event.Source[*providerapi.Snapshot]
+	imageEvents    event.Source[*api.Image]
+	snapshotEvents event.Source[*api.Snapshot]
 
 	monitors string
 	client   string
 	pool     string
 
-	keyEncryption encryption.Encryptor
+	keyEncryption       encryption.Encryptor
+	populatorBufferSize int64
 
 	workerSize int
 }
@@ -137,7 +133,7 @@ type ImageReconciler struct {
 func (r *ImageReconciler) Start(ctx context.Context) error {
 	log := r.log
 
-	imgEventReg, err := r.imageEvents.AddHandler(event.HandlerFunc[*providerapi.Image](func(evt event.Event[*providerapi.Image]) {
+	imgEventReg, err := r.imageEvents.AddHandler(event.HandlerFunc[*api.Image](func(evt event.Event[*api.Image]) {
 		r.queue.Add(evt.Object.ID)
 	}))
 	if err != nil {
@@ -147,22 +143,9 @@ func (r *ImageReconciler) Start(ctx context.Context) error {
 		_ = r.imageEvents.RemoveHandler(imgEventReg)
 	}()
 
-	snapEventReg, err := r.snapshotEvents.AddHandler(event.HandlerFunc[*providerapi.Snapshot](func(evt event.Event[*providerapi.Snapshot]) {
-		if evt.Type != event.TypeUpdated || evt.Object.Status.State != providerapi.SnapshotStateReady {
-			return
-		}
-
-		imageList, err := r.images.List(ctx, store.MatchingFields{providerapi.ImageSpecSnapshotRefField: evt.Object.ID})
-		if err != nil {
-			log.Error(err, "failed to list images")
-			return
-		}
-
-		for _, img := range imageList {
-			if snapshotRef := img.Spec.SnapshotRef; snapshotRef != nil && *snapshotRef == evt.Object.ID {
-				r.Eventf(img.Metadata, corev1.EventTypeNormal, "ImagePullSucceeded", "PullImage", "Pulled image %s", *img.Spec.SnapshotRef)
-				r.queue.Add(img.ID)
-			}
+	snapEventReg, err := r.snapshotEvents.AddHandler(event.HandlerFunc[*api.Snapshot](func(evt event.Event[*api.Snapshot]) {
+		if evt.Type == event.TypeDeleted || (evt.Type == event.TypeUpdated && evt.Object.Status.State != api.SnapshotStatePending) {
+			r.requeueImagesForSnapshot(ctx, evt.Object.ID)
 		}
 	}))
 	if err != nil {
@@ -191,6 +174,17 @@ func (r *ImageReconciler) Start(ctx context.Context) error {
 	return nil
 }
 
+func (r *ImageReconciler) requeueImagesForSnapshot(ctx context.Context, snapshotID string) {
+	images, err := r.imageStore.List(ctx, store.MatchingFields{api.ImageSpecSnapshotSourceField: snapshotID})
+	if err != nil {
+		r.log.Error(err, "failed to list images for snapshot event requeue")
+		return
+	}
+	for _, img := range images {
+		r.queue.Add(img.ID)
+	}
+}
+
 func (r *ImageReconciler) processNextWorkItem(ctx context.Context, log logr.Logger) bool {
 	id, shutdown := r.queue.Get()
 	if shutdown {
@@ -212,350 +206,14 @@ func (r *ImageReconciler) processNextWorkItem(ctx context.Context, log logr.Logg
 }
 
 const (
-	ImageFinalizer = "image"
+	imageFinalizer = "image"
 )
-
-func (r *ImageReconciler) deleteImage(ctx context.Context, log logr.Logger, ioCtx *rados.IOContext, image *providerapi.Image) error {
-	if !slices.Contains(image.Finalizers, ImageFinalizer) {
-		log.V(1).Info("image has no finalizer: done")
-		return nil
-	}
-
-	if err := r.deleteImageSnapshots(ctx, log, ioCtx, image); err != nil {
-		return fmt.Errorf("failed to delete image snapshots: %w", err)
-	}
-
-	if err := librbd.RemoveImage(ioCtx, ImageIDToRBDID(image.ID)); err != nil && !errors.Is(err, librbd.ErrNotFound) {
-		return fmt.Errorf("failed to remove rbd image: %w", err)
-	}
-	log.V(2).Info("Rbd image deleted")
-
-	image.Finalizers = utils.DeleteSliceElement(image.Finalizers, ImageFinalizer)
-	if _, err := r.images.Update(ctx, image); store.IgnoreErrNotFound(err) != nil {
-		return fmt.Errorf("failed to update image metadata: %w", err)
-	}
-	r.Eventf(image.Metadata, corev1.EventTypeNormal, "ImageDeletionSucceeded", "DeleteImage", "Deleted image")
-	log.V(2).Info("Removed Finalizers")
-
-	return nil
-}
-
-// since ceph does not allow deletion of rbd image if it has snapshots, we will follow below steps to achieve it
-// 1. Clone each snapshot into separate rbd image and create snapshot of that cloned rbd image with same name as snapshot.
-// 2. Flatten all child images(cloned images from step 1 and rbd images which are restored using this snapshot) of each snapshot.
-// 3. Remove all snapshots of rbd image and update each snapshot source in store to cloned rbd image id
-func (r *ImageReconciler) deleteImageSnapshots(ctx context.Context, log logr.Logger, ioCtx *rados.IOContext, image *providerapi.Image) error {
-	img, err := openImage(ioCtx, ImageIDToRBDID(image.ID))
-	if err != nil {
-		if !errors.Is(err, librbd.ErrNotFound) {
-			return err
-		}
-		log.V(2).Info("Rbd image not found, it was probably already deleted")
-		return nil
-	}
-	defer closeImage(log, img)
-
-	snaps, err := img.GetSnapshotNames()
-	if err != nil {
-		return fmt.Errorf("unable to list snapshots: %w", err)
-	}
-	log.V(2).Info("Image snapshots", "count", len(snaps))
-
-	// clone all snapshots into rbd image and create corresponding snapshot
-	for _, snapInfo := range snaps {
-		snapName := snapInfo.Name
-		log.V(2).Info("Create snapshot clone", "snapshotId", snapName)
-		// cloned image name will be same as snapshot name
-		if err := r.cloneSnapshot(ctx, log, ioCtx, snapName, image); err != nil {
-			return fmt.Errorf("failed to create snapshot clone: %w", err)
-		}
-
-		if isSnapshotExist, isSnapshotProtected, err := snapshotExistsAndProtected(log, ioCtx, ImageIDToRBDID(snapName), snapName); err != nil {
-			return fmt.Errorf("failed to check if snapshot %s exists: %w", snapName, err)
-		} else if isSnapshotExist {
-			if !isSnapshotProtected {
-				// Snapshot exists but not protected - just protect it
-				if err := protectSnapshot(log, ioCtx, ImageIDToRBDID(snapName), snapName); err != nil {
-					return fmt.Errorf("failed to protect snapshot: %w", err)
-				}
-			}
-			log.V(2).Info("Snapshot of cloned image is already created")
-			continue
-		}
-
-		log.V(2).Info("Create snapshot of cloned image", "clonedImageId", snapName)
-		if err := createSnapshot(log, ioCtx, snapName, ImageIDToRBDID(snapName)); err != nil {
-			return fmt.Errorf("failed to create snapshot of cloned image: %w", err)
-		}
-	}
-
-	// flatten all child images of the original image's snapshots
-	if err := flattenChildImages(log, r.conn, img); err != nil {
-		return fmt.Errorf("failed to flatten snapshot child images: %w", err)
-	}
-
-	// remove snapshot and update snapshot source in store
-	for _, snapInfo := range snaps {
-		snapName := snapInfo.Name
-		snap := img.GetSnapshot(snapName)
-
-		log.V(2).Info("Remove snapshot", "snapshotId", snapName)
-		if err := removeSnapshot(snap); err != nil {
-			return err
-		}
-
-		snapshot, err := r.snapshots.Get(ctx, snapName)
-		if err != nil {
-			if !errors.Is(err, store.ErrNotFound) {
-				return fmt.Errorf("failed to get snapshot %s: %w", snapName, err)
-			}
-			log.V(2).Info("Snapshot not found in store, skipping update", "snapshotId", snapName)
-			continue
-		}
-
-		log.V(2).Info("Update snapshot source in store")
-		snapshot.Source.VolumeImageID = snapName
-		if _, err := r.snapshots.Update(ctx, snapshot); err != nil {
-			return fmt.Errorf("failed to update snapshot source: %w", err)
-		}
-	}
-	return nil
-}
-
-func (r *ImageReconciler) cloneSnapshot(ctx context.Context, log logr.Logger, ioCtx *rados.IOContext, snapName string, image *providerapi.Image) error {
-	rbdExists, err := r.isImageExisting(ioCtx, snapName)
-	if err != nil {
-		return fmt.Errorf("failed to check rbd image existence: %w", err)
-	}
-
-	storeExists := true
-	if _, err := r.images.Get(ctx, snapName); err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("failed to check image in store: %w", err)
-		}
-		storeExists = false
-	}
-
-	if rbdExists && storeExists {
-		log.V(2).Info("Snapshot clone is already created")
-		return nil
-	}
-
-	clonedImage := &providerapi.Image{
-		Metadata: apiutils.Metadata{
-			ID: snapName,
-		},
-		Spec: providerapi.ImageSpec{
-			Size:        image.Spec.Size,
-			Limits:      image.Spec.Limits,
-			SnapshotRef: ptr.To(snapName),
-			Encryption:  image.Spec.Encryption,
-		},
-	}
-
-	if !rbdExists {
-		options := librbd.NewRbdImageOptions()
-		defer options.Destroy()
-		if err := options.SetString(librbd.ImageOptionDataPool, r.pool); err != nil {
-			return fmt.Errorf("failed to set data pool: %w", err)
-		}
-
-		log.V(2).Info("Creating image from snapshot", "snapshotId", snapName)
-		if ok, err := r.createImageFromSnapshot(ctx, log, ioCtx, clonedImage, snapName, options); err != nil {
-			return fmt.Errorf("failed to create image from snapshot: %w", err)
-		} else if !ok {
-			return nil
-		}
-	} else {
-		log.V(2).Info("Rbd image for snapshot clone already exists")
-	}
-
-	log.V(2).Info("Setting parent image metadata to cloned image")
-	metadata, err := providerapi.GetObjectMetadataFromObjectID(image.Metadata)
-	if err != nil {
-		return fmt.Errorf("failed to get metadata from image: %w", err)
-	}
-	if err := providerapi.SetObjectMetadataFromMetadata(clonedImage, metadata); err != nil {
-		return fmt.Errorf("failed to set metadata: %w", err)
-	}
-
-	log.V(2).Info("Setting class label to cloned image")
-	class, found := providerapi.GetClassLabelFromObject(image)
-	if !found {
-		return fmt.Errorf("class label not found on image")
-	}
-	providerapi.SetClassLabelForObject(clonedImage, class)
-
-	providerapi.SetManagerLabel(clonedImage, providerapi.VolumeManager)
-	if _, err := r.images.Create(ctx, clonedImage); err != nil {
-		return fmt.Errorf("failed to create image: %w", err)
-	}
-
-	return nil
-}
-
-type fetchAuthResponse struct {
-	Key string `json:"key"`
-}
-
-func (r *ImageReconciler) fetchAuth(log logr.Logger) (string, string, error) {
-	cmd1, err := json.Marshal(map[string]string{
-		"prefix": "auth get-key",
-		"entity": r.client,
-		"format": "json",
-	})
-	if err != nil {
-		return "", "", fmt.Errorf("unable to marshal command: %w", err)
-	}
-
-	log.V(3).Info("Try to fetch client", "name", r.client)
-	data, _, err := r.conn.MonCommand(cmd1)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to execute mon command: %w", err)
-	}
-
-	response := fetchAuthResponse{}
-	if err := json.Unmarshal(data, &response); err != nil {
-		return "", "", fmt.Errorf("unable to unmarshal response: %w", err)
-	}
-
-	return strings.TrimPrefix(r.client, "client."), response.Key, nil
-}
-
-func (r *ImageReconciler) reconcileSnapshot(ctx context.Context, log logr.Logger, img *providerapi.Image) error {
-	if img.Spec.Image == "" || img.Spec.SnapshotRef != nil {
-		return nil
-	}
-
-	log.V(2).Info("Parse image reference", "Image", img.Spec.Image)
-	spec, err := reference.Parse(img.Spec.Image)
-	if err != nil {
-		return fmt.Errorf("failed to parse image reference: %w", err)
-	}
-
-	log.V(2).Info("Resolve image reference")
-	osImgSrc, err := createOsImageSource(toPlatform(img.Spec.ImageArchitecture))
-	if err != nil {
-		return fmt.Errorf("failed to create os image source: %w", err)
-	}
-
-	resolvedImg, err := osImgSrc.Resolve(ctx, img.Spec.Image)
-	if err != nil {
-		if errors.Is(err, remote.ErrNoPlatformMatch) {
-			r.Eventf(img.Metadata, corev1.EventTypeWarning, "NoPlatformMatch", "ResolveImage", "Image %s has no matching platform: %v", img.Spec.Image, err)
-		}
-		return fmt.Errorf("failed to resolve image ref in os image source: %w", err)
-	}
-
-	snapshotDigest := resolvedImg.Descriptor().Digest.String()
-	resolvedImageName := fmt.Sprintf("%s@%s", spec.Locator, snapshotDigest)
-
-	//TODO select later by label
-	snap, err := r.snapshots.Get(ctx, snapshotDigest)
-	if err != nil {
-		switch {
-		case errors.Is(err, store.ErrNotFound):
-			log.V(2).Info("Create image snapshot", "SnapshotID", snapshotDigest)
-			snapshotLabels := map[string]string{
-				imageDigestLabel: snapshotDigest,
-			}
-
-			if img.Spec.ImageArchitecture != nil {
-				snapshotLabels[providerapi.MachineArchitectureLabel] = *img.Spec.ImageArchitecture
-			}
-
-			snap, err = r.snapshots.Create(ctx, &providerapi.Snapshot{
-				Metadata: apiutils.Metadata{
-					ID:     snapshotDigest,
-					Labels: snapshotLabels,
-				},
-				Source: providerapi.SnapshotSource{
-					IronCoreImage: resolvedImageName,
-				},
-			})
-
-			if err != nil {
-				r.Eventf(img.Metadata, corev1.EventTypeWarning, "CreateImageSnapshotFailed", "CreateImageSnapshot", "Failed to create image snapshot: %s", err)
-				return fmt.Errorf("failed to create snapshot: %w", err)
-			}
-			r.Eventf(img.Metadata, corev1.EventTypeNormal, "CreateImageSnapshotSucceeded", "CreateImageSnapshot", "Created image snapshot")
-		default:
-			return fmt.Errorf("failed to get snapshot: %w", err)
-		}
-	}
-
-	img.Spec.SnapshotRef = ptr.To(snap.ID)
-
-	log.V(2).Info("Update snapshot reference in image store")
-	if _, err := r.images.Update(ctx, img); err != nil {
-		return fmt.Errorf("failed to update image snapshot ref: %w", err)
-	}
-
-	return nil
-}
-
-func (r *ImageReconciler) isImageExisting(ioCtx *rados.IOContext, imageID string) (bool, error) {
-	images, err := librbd.GetImageNames(ioCtx)
-	if err != nil {
-		return false, fmt.Errorf("failed to list images: %w", err)
-	}
-
-	for _, img := range images {
-		if ImageIDToRBDID(imageID) == img {
-			return true, nil
-		}
-	}
-
-	return false, nil
-}
-
-func (r *ImageReconciler) updateImage(ctx context.Context, log logr.Logger, ioCtx *rados.IOContext, image *providerapi.Image) (err error) {
-	log.V(2).Info("Updating image")
-	img, err := openImage(ioCtx, ImageIDToRBDID(image.ID))
-	if err != nil {
-		return err
-	}
-	defer closeImage(log, img)
-
-	currentImageSize, err := img.GetSize()
-	if err != nil {
-		return fmt.Errorf("failed to get image size: %w", err)
-	}
-
-	requestedSize := round.OffBytes(image.Spec.Size)
-
-	switch {
-	case currentImageSize == requestedSize:
-		log.V(2).Info("No update needed: Old and new image size same")
-		return nil
-	case requestedSize < currentImageSize:
-		r.Eventf(image.Metadata, corev1.EventTypeWarning, "UpdateImageSizeFailed", "ResizeImage", "Image shrink not supported")
-		return fmt.Errorf("failed to shrink image: not supported")
-	}
-
-	if err := img.Resize(requestedSize); err != nil {
-		r.Eventf(image.Metadata, corev1.EventTypeWarning, "UpdateImageSizeFailed", "ResizeImage", "Failed to resize image: %s", err)
-		return fmt.Errorf("failed to resize image: %w", err)
-	}
-
-	image.Status.Size = requestedSize
-	if _, err = r.images.Update(ctx, image); err != nil {
-		return fmt.Errorf("failed to update size information of image: %w", err)
-	}
-	r.Eventf(image.Metadata, corev1.EventTypeNormal, "UpdatedImageSizeSucceeded", "ResizeImage", "Updated image size. requestedSize: %d currentSize: %d", requestedSize, currentImageSize)
-	log.V(1).Info("Updated image", "requestedSize", requestedSize, "currentSize", currentImageSize)
-	return nil
-}
 
 func (r *ImageReconciler) reconcileImage(ctx context.Context, id string) error {
 	log := logr.FromContextOrDiscard(ctx)
-	ioCtx, err := r.conn.OpenIOContext(r.pool)
-	if err != nil {
-		return fmt.Errorf("unable to get io context: %w", err)
-	}
-	defer ioCtx.Destroy()
 
-	img, err := r.images.Get(ctx, id)
+	log.V(1).Info("Get image from store")
+	image, err := r.imageStore.Get(ctx, id)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
 			return fmt.Errorf("failed to fetch image from store: %w", err)
@@ -563,257 +221,338 @@ func (r *ImageReconciler) reconcileImage(ctx context.Context, id string) error {
 		return nil
 	}
 
-	if img.DeletedAt != nil {
-		if err := r.deleteImage(ctx, log, ioCtx, img); err != nil {
+	if image.DeletedAt != nil {
+		if err := r.deleteImage(ctx, log, image); err != nil {
 			return fmt.Errorf("failed to delete image: %w", err)
 		}
-		log.V(1).Info("Successfully deleted image")
 		return nil
 	}
 
-	if !slices.Contains(img.Finalizers, ImageFinalizer) {
-		img.Finalizers = append(img.Finalizers, ImageFinalizer)
-		if _, err := r.images.Update(ctx, img); err != nil {
-			return fmt.Errorf("failed to set finalizers: %w", err)
-		}
+	if _, added, err := addFinalizer(ctx, r.imageStore, image, imageFinalizer); err != nil {
+		return fmt.Errorf("failed to set finalizers: %w", err)
+	} else if added {
+		log.V(1).Info("Added finalizer")
 		return nil
 	}
 
-	if err := r.reconcileSnapshot(ctx, log, img); err != nil {
-		return fmt.Errorf("failed to reconcile snapshot: %w", err)
-	}
-
-	imageExists, err := r.isImageExisting(ioCtx, img.ID)
+	ioCtx, err := r.conn.OpenIOContext(r.pool)
 	if err != nil {
-		return fmt.Errorf("failed to check image existence: %w", err)
+		return fmt.Errorf("unable to get RADOS IOContext: %w", err)
 	}
-	log.V(1).Info("Checked image existence", "imageExists", imageExists)
+	defer ioCtx.Destroy()
 
-	if imageExists {
-		if img.Status.State == providerapi.ImageStateAvailable {
-			if err := r.updateImage(ctx, log, ioCtx, img); err != nil {
-				return fmt.Errorf("failed to update image: %w", err)
-			}
+	rbdImage, err := librbd.OpenImage(ioCtx, image.ID, librbd.NoSnapshot)
+	if err != nil {
+		if !errors.Is(err, librbd.ErrNotFound) {
+			return fmt.Errorf("failed to open RBD image: %w", err)
+		}
+		log.V(1).Info("RBD image not found, creating")
+		if ok, err := r.createImage(ctx, ioCtx, log, image); err != nil {
+			return fmt.Errorf("failed to create RBD image: %w", err)
+		} else if !ok {
+			// Image creation is not yet complete
 			return nil
 		}
+		rbdImage, err = librbd.OpenImage(ioCtx, image.ID, librbd.NoSnapshot)
+		if err != nil {
+			return fmt.Errorf("failed to open RBD image after creation: %w", err)
+		}
+	}
+	defer closeImage(log, rbdImage)
+
+	if image.Spec.SnapshotSource != nil {
+		snapshotID := *image.Spec.SnapshotSource
+		snapshot, err := r.snapshotStore.Get(ctx, snapshotID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("failed to get source snapshot from store: %w", err)
+		}
+		// Flatten images if their snapshot source is deleted
+		if snapshot == nil || snapshot.DeletedAt != nil {
+			if _, err := rbdImage.GetParent(); err != nil {
+				if !errors.Is(err, librbd.ErrNotFound) {
+					return fmt.Errorf("failed to get RBD parent snapshot: %w", err)
+				}
+				log.V(1).Info("RBD image is flattened", "snapshotId", snapshotID)
+			} else {
+				log.Info("Flattening RBD image", "snapshotId", snapshotID)
+				// TODO: Run flatten asynchronously
+				// TODO: Ensure only a single flatten operation is running at a time
+				if err := rbdImage.Flatten(); err != nil {
+					return fmt.Errorf("failed to flatten RBD image: %w", err)
+				}
+				log.Info("RBD image successfully flattened", "snapshotId", snapshotID)
+			}
+
+			// Remove finalizer from source snapshot to signal the image has been flattened,
+			// so the image is no longer connected to the snapshot
+			if snapshot != nil {
+				sourceSnapshotFinalizer := fmt.Sprintf("%s/%s", imageFinalizer, image.ID)
+				if _, removed, err := removeFinalizer(ctx, r.snapshotStore, snapshot, sourceSnapshotFinalizer); err != nil {
+					return fmt.Errorf("failed to remove finalizer from source snapshot: %w", err)
+				} else if removed {
+					log.V(1).Info("Removed finalizer from source snapshot", "snapshotId", snapshot.ID)
+				}
+			}
+		}
 	} else {
-		options := librbd.NewRbdImageOptions()
-		defer options.Destroy()
-		if err := options.SetString(librbd.ImageOptionDataPool, r.pool); err != nil {
-			return fmt.Errorf("failed to set data pool: %w", err)
-		}
-		log.V(2).Info("Configured pool", "pool", r.pool)
-
-		switch {
-		case img.Spec.SnapshotRef != nil:
-			snapshotRef := img.Spec.SnapshotRef
-			log.V(2).Info("Creating image from snapshot", "snapshotId", *snapshotRef)
-			ok, err := r.createImageFromSnapshot(ctx, log, ioCtx, img, *snapshotRef, options)
-			if err != nil {
-				return fmt.Errorf("failed to create image from snapshot: %w", err)
+		if parent, err := rbdImage.GetParent(); err != nil {
+			if !errors.Is(err, librbd.ErrNotFound) {
+				return fmt.Errorf("failed to get RBD image parent info: %w", err)
 			}
-			if !ok {
-				return nil
+		} else {
+			log.Info("Image has no snapshot source configured, but has a parent in Ceph. Flattening RBD image", "snapshotId", parent.Snap.SnapName)
+			// TODO: Run flatten asynchronously
+			// TODO: Ensure only a single flatten operation is running at a time
+			if err := rbdImage.Flatten(); err != nil {
+				return fmt.Errorf("failed to flatten image: %w", err)
 			}
-
-		default:
-			log.V(2).Info("Creating empty image")
-			if err := r.createEmptyImage(log, ioCtx, img, options); err != nil {
-				return fmt.Errorf("failed to create empty image: %w", err)
-			}
+			log.Info("RBD image successfully flattened", "snapshotId", parent.Snap.SnapName)
 		}
 	}
 
-	if err := r.setWWN(log, ioCtx, img); err != nil {
-		return fmt.Errorf("failed to set wwn: %w", err)
+	if image.Status.Encryption != api.EncryptionStateHeaderSet && image.Spec.Encryption.Type == api.EncryptionTypeEncrypted {
+		passphrase, err := r.keyEncryption.Decrypt(image.Spec.Encryption.EncryptedPassphrase)
+		if err != nil {
+			return fmt.Errorf("failed to decrypt passphrase: %w", err)
+		}
+
+		if err := rbdImage.EncryptionFormat(librbd.EncryptionOptionsLUKS2{
+			Alg:        librbd.EncryptionAlgorithmAES256,
+			Passphrase: passphrase,
+		}); err != nil {
+			return fmt.Errorf("failed to set encryption format: %w", err)
+		}
+		image.Status.Encryption = api.EncryptionStateHeaderSet
+		if _, err = r.imageStore.Update(ctx, image); err != nil {
+			return fmt.Errorf("failed to update image metadata: %w", err)
+		}
+		return nil
 	}
 
-	if err := r.setEncryptionHeader(ctx, log, ioCtx, img); err != nil {
-		r.Eventf(img.Metadata, corev1.EventTypeWarning, "ConfigureEncryptionFailed", "ConfigureEncryption", "Failed to configure encryption header: %s", err)
-		return fmt.Errorf("failed to set encryption header: %w", err)
+	newSize := round.OffBytes(image.Spec.Size)
+	currentSize, err := rbdImage.GetSize()
+	if err != nil {
+		return fmt.Errorf("failed to get current RBD image size: %w", err)
+	}
+	if currentSize != newSize {
+		log.Info("Resizing RBD image", "currentSize", currentSize, "newSize", newSize)
+		if err := rbdImage.Resize(newSize); err != nil {
+			return fmt.Errorf("failed to resize RBD image: %w", err)
+		}
+		image.Status.Size = newSize
+		if _, err := r.imageStore.Update(ctx, image); err != nil {
+			return fmt.Errorf("failed to update image status after resize: %w", err)
+		}
+		return nil
 	}
 
-	if err := r.setImageLimits(log, ioCtx, img); err != nil {
-		return fmt.Errorf("failed to set limits: %w", err)
+	metadata, err := rbdImage.ListMetadata()
+	if err != nil {
+		return fmt.Errorf("failed to list image metadata: %w", err)
 	}
 
-	user, key, err := r.fetchAuth(log)
+	if wwn, ok := metadata[WWNKey]; !ok || wwn != image.Spec.WWN {
+		if err := rbdImage.SetMetadata(WWNKey, image.Spec.WWN); err != nil {
+			return fmt.Errorf("failed to set wwn (%s): %w", image.Spec.WWN, err)
+		}
+	}
+
+	for limit, value := range image.Spec.Limits {
+		metaKey := fmt.Sprintf("%s%s", LimitMetadataPrefix, limit)
+		metaVal := strconv.FormatInt(value, 10)
+
+		if actualVal, ok := metadata[metaKey]; !ok || actualVal != metaVal {
+			if err := rbdImage.SetMetadata(metaKey, metaVal); err != nil {
+				return fmt.Errorf("failed to set limit (%s): %w", metaKey, err)
+			}
+		}
+	}
+
+	// TODO: Think about caching the ceph auth key instead of re-fetching it on every reconcile loop.
+	user, key, err := fetchAuth(r.client, r.conn)
 	if err != nil {
 		return fmt.Errorf("failed to fetch credentials: %w", err)
 	}
 
-	img.Status.Access = &providerapi.ImageAccess{
+	newAccess := &api.ImageAccess{
 		Monitors: r.monitors,
-		Handle:   fmt.Sprintf("%s/%s", r.pool, ImageIDToRBDID(img.ID)),
+		Handle:   fmt.Sprintf("%s/%s", r.pool, image.ID),
 		User:     user,
 		UserKey:  key,
 	}
-	img.Status.State = providerapi.ImageStateAvailable
-	img.Status.Size = round.OffBytes(img.Spec.Size)
-	if _, err = r.images.Update(ctx, img); err != nil {
-		return fmt.Errorf("failed to update image metadate: %w", err)
-	}
 
-	log.V(1).Info("Successfully reconciled image")
+	needsUpdate := image.Status.State != api.ImageStateAvailable ||
+		image.Status.Size != newSize ||
+		!equalAccess(image.Status.Access, newAccess)
 
-	return nil
-}
-
-func (r *ImageReconciler) setImageLimits(log logr.Logger, ioCtx *rados.IOContext, image *providerapi.Image) error {
-	if len(image.Spec.Limits) <= 0 {
+	if !needsUpdate {
+		log.V(1).Info("Image is up to date, nothing to do")
 		return nil
 	}
 
-	log.V(1).Info("Configuring limits")
-	img, err := openImage(ioCtx, ImageIDToRBDID(image.ID))
-	if err != nil {
-		return err
-	}
-	defer closeImage(log, img)
+	image.Status.State = api.ImageStateAvailable
+	image.Status.Access = newAccess
+	image.Status.Size = newSize
 
-	for limit, value := range image.Spec.Limits {
-		if err := img.SetMetadata(fmt.Sprintf("%s%s", LimitMetadataPrefix, limit), strconv.FormatInt(value, 10)); err != nil {
-			r.Eventf(image.Metadata, corev1.EventTypeWarning, "SetImageLimitFailed", "SetImageLimits", "Failed to set image limit: %s", err)
-			return fmt.Errorf("failed to set limit (%s): %w", limit, err)
+	if _, err = r.imageStore.Update(ctx, image); err != nil {
+		return fmt.Errorf("failed to update image metadata: %w", err)
+	}
+	return nil
+}
+
+func (r *ImageReconciler) createImage(ctx context.Context, ioCtx *rados.IOContext, log logr.Logger, image *api.Image) (bool, error) {
+	options := librbd.NewRbdImageOptions()
+	defer options.Destroy()
+	if err := options.SetString(librbd.ImageOptionDataPool, r.pool); err != nil {
+		return false, fmt.Errorf("failed to set data pool: %w", err)
+	}
+
+	// Create empty image if no snapshot source is given
+	if image.Spec.SnapshotSource == nil {
+		if err := librbd.CreateImage(ioCtx, image.ID, round.OffBytes(image.Spec.Size), options); err != nil {
+			if !errors.Is(err, librbd.ErrExist) {
+				return false, fmt.Errorf("failed to create RBD image: %w", err)
+			}
+			log.V(1).Info("RBD image already exists")
+		} else {
+			log.Info("Created RBD image")
 		}
-		r.Eventf(image.Metadata, corev1.EventTypeNormal, "SetImageLimitSucceeded", "SetImageLimits", "Image limit set. limit: %s value: %d", limit, value)
-		log.V(3).Info("Set image limit", "limit", limit, "value", value)
+		return true, nil
 	}
 
-	return nil
-}
-
-func (r *ImageReconciler) setWWN(log logr.Logger, ioCtx *rados.IOContext, image *providerapi.Image) error {
-	log.V(1).Info("Setting WWN")
-	img, err := openImage(ioCtx, ImageIDToRBDID(image.ID))
+	snapshotRef := *image.Spec.SnapshotSource
+	snapshot, err := r.snapshotStore.Get(ctx, snapshotRef)
 	if err != nil {
-		return err
-	}
-	defer closeImage(log, img)
-
-	if err := img.SetMetadata(WWNKey, image.Spec.WWN); err != nil {
-		return fmt.Errorf("failed to set wwn (%s): %w", image.Spec.WWN, err)
-	}
-	log.V(3).Info("Set image wwn", "wwn", image.Spec.WWN)
-
-	return nil
-}
-
-func (r *ImageReconciler) setEncryptionHeader(ctx context.Context, log logr.Logger, ioCtx *rados.IOContext, image *providerapi.Image) error {
-	if image.Spec.Encryption == nil || image.Spec.Encryption.Type == "" || image.Spec.Encryption.Type == providerapi.EncryptionTypeUnencrypted || image.Status.Encryption == providerapi.EncryptionStateHeaderSet {
-		return nil
-	}
-
-	log.V(1).Info("Configuring encryption")
-	passphrase, err := r.keyEncryption.Decrypt(image.Spec.Encryption.EncryptedPassphrase)
-	if err != nil {
-		return fmt.Errorf("failed to decrypt passphrase: %w", err)
-	}
-
-	img, err := openImage(ioCtx, ImageIDToRBDID(image.ID))
-	if err != nil {
-		return err
-	}
-	defer closeImage(log, img)
-
-	if err := img.EncryptionFormat(librbd.EncryptionOptionsLUKS2{
-		Alg:        librbd.EncryptionAlgorithmAES256,
-		Passphrase: passphrase,
-	}); err != nil {
-		return fmt.Errorf("failed to set encryption format: %w", err)
-	}
-
-	image.Status.Encryption = providerapi.EncryptionStateHeaderSet
-	if _, err = r.images.Update(ctx, image); err != nil {
-		return fmt.Errorf("failed to update image encryption state: %w", err)
-	}
-	r.Eventf(image.Metadata, corev1.EventTypeNormal, "ConfigureEncryptionSucceeded", "ConfigureEncryption", "Encryption header configured")
-
-	return nil
-}
-
-func (r *ImageReconciler) createEmptyImage(log logr.Logger, ioCtx *rados.IOContext, image *providerapi.Image, options *librbd.ImageOptions) error {
-	if err := librbd.CreateImage(ioCtx, ImageIDToRBDID(image.ID), round.OffBytes(image.Spec.Size), options); err != nil {
-		r.Eventf(image.Metadata, corev1.EventTypeWarning, "EmptyImageCreationFailed", "CreateImage", "Empty image creation failed: %s", err)
-		return fmt.Errorf("failed to create rbd image: %w", err)
-	}
-	r.Eventf(image.Metadata, corev1.EventTypeNormal, "EmptyImageCreationSucceeded", "CreateImage", "Created empty image. bytes: %d", image.Spec.Size)
-	log.V(2).Info("Created empty image", "bytes", image.Spec.Size)
-
-	return nil
-}
-
-func (r *ImageReconciler) createImageFromSnapshot(ctx context.Context, log logr.Logger, ioCtx *rados.IOContext, image *providerapi.Image, snapshotRef string, options *librbd.ImageOptions) (bool, error) {
-	snapshot, err := r.snapshots.Get(ctx, snapshotRef)
-	if err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			return false, fmt.Errorf("failed to get snapshot: %w", err)
+		if errors.Is(err, store.ErrNotFound) {
+			return false, fmt.Errorf("source snapshot '%s' not found: %w", snapshotRef, err)
 		}
+		return false, fmt.Errorf("failed to get source snapshot: %w", err)
+	}
 
-		log.V(1).Info("snapshot not found", "snapshotId", snapshotRef)
+	if snapshot.Status.Size > image.Spec.Size {
+		return false, fmt.Errorf("image size is smaller than source snapshot size: (%d < %d)", image.Spec.Size, snapshot.Status.Size)
+	}
+
+	switch snapshot.Status.State {
+	case api.SnapshotStatePending:
+		log.Info("Source snapshot is pending, waiting", "snapshotId", snapshot.ID)
 		return false, nil
+	case api.SnapshotStateReady:
+		log.V(1).Info("Source snapshot is ready", "snapshotId", snapshot.ID)
+	case api.SnapshotStateFailed:
+		return false, fmt.Errorf("source snapshot %s is failed", snapshotRef)
+	default:
+		return false, fmt.Errorf("source snapshot %s is in unknown state '%s'", snapshotRef, snapshot.Status.State)
 	}
 
-	if snapshot.Status.Size > int64(image.Spec.Size) {
-		r.Eventf(image.Metadata, corev1.EventTypeWarning, "ImageSizeIsSmallerThanSnapshotSize", "CreateImageFromSnapshot", "image %s size is smaller than snapshot size: %d < %d", image.ID, image.Spec.Size, snapshot.Status.Size)
-		return false, fmt.Errorf("image %s size is smaller than snapshot size: (%d < %d)", image.ID, image.Spec.Size, snapshot.Status.Size)
-	}
-
-	if snapshot.Status.State != providerapi.SnapshotStateReady && snapshot.Status.State != providerapi.SnapshotStatePopulated {
-		log.V(1).Info("snapshot is not populated", "state", snapshot.Status.State)
-		return false, nil
-	}
-
-	parentName, snapName, err := getSnapshotSourceDetails(snapshot)
+	parentImage, err := r.imageStore.Get(ctx, snapshot.Spec.ImageRef)
 	if err != nil {
-		return false, fmt.Errorf("failed to get snapshot source details: %w", err)
+		return false, fmt.Errorf("failed to get parent image of source snapshot %s: %w", snapshot.ID, err)
 	}
 
-	log.V(2).Info("Check if rbd snapshot exists", "snapshotId", snapName)
-	isSnapshotExist, isSnapshotProtected, err := snapshotExistsAndProtected(log, ioCtx, parentName, snapName)
-	if err != nil {
-		return false, fmt.Errorf("failed to check volume image snapshot existence: %w", err)
+	// Put finalizer on source snapshot to allow the image to be flattened before snapshot deletion
+	sourceSnapshotFinalizer := fmt.Sprintf("%s/%s", imageFinalizer, image.ID)
+	var added bool
+	if snapshot, added, err = addFinalizer(ctx, r.snapshotStore, snapshot, sourceSnapshotFinalizer); err != nil {
+		return false, fmt.Errorf("failed to set finalizers on source snapshot: %w", err)
+	} else if added {
+		log.V(1).Info("Added finalizer to source snapshot", "snapshotId", snapshot.ID)
 	}
-	if isSnapshotExist && !isSnapshotProtected {
-		if err := protectSnapshot(log, ioCtx, parentName, snapName); err != nil {
-			return false, fmt.Errorf("failed to protect snapshot %s: %w", snapName, err)
+
+	if err := librbd.CloneImage(ioCtx, parentImage.ID, snapshot.ID, ioCtx, image.ID, options); err != nil {
+		if !errors.Is(err, librbd.ErrExist) {
+			return false, fmt.Errorf("failed to clone RBD image: %w", err)
 		}
-		isSnapshotExist = true
+		log.V(1).Info("RBD clone already exists", "snapshotId", snapshot.ID)
+	} else {
+		log.Info("Cloned RBD image from snapshot", "snapshotId", snapshot.ID)
 	}
-	if !isSnapshotExist {
-		log.V(1).Info("Rbd snapshot does not exist. Mark snapshot as failed", "snapshotName", snapName)
-		snapshot.Status.State = providerapi.SnapshotStateFailed
-		if _, err := r.snapshots.Update(ctx, snapshot); store.IgnoreErrNotFound(err) != nil {
-			return false, fmt.Errorf("failed to update snapshot state: %w", err)
-		}
-		return false, nil
-	}
-	log.V(2).Info("Checked rbd snapshot existence", "snapshotId", snapName, "isSnapshotExist", isSnapshotExist)
 
-	ioCtx2, err := r.conn.OpenIOContext(r.pool)
-	if err != nil {
-		return false, fmt.Errorf("unable to get io context: %w", err)
-	}
-	defer ioCtx2.Destroy()
-
-	log.V(1).Info("Cloning Image", "ParentName", parentName, "SnapName", snapName, "ImageID", image.ID)
-	if err = librbd.CloneImage(ioCtx2, parentName, snapName, ioCtx, ImageIDToRBDID(image.ID), options); err != nil {
-		r.Eventf(image.Metadata, corev1.EventTypeWarning, "CreateImageFromSnapshotFailed", "CreateImageFromSnapshot", "Failed to clone rbd image: %s", err)
-		return false, fmt.Errorf("failed to clone rbd image: %w", err)
-	}
-	log.V(2).Info("Cloned image")
-
-	img, err := openImage(ioCtx, ImageIDToRBDID(image.ID))
-	if err != nil {
-		return false, err
-	}
-	defer closeImage(log, img)
-
-	if err := img.Resize(round.OffBytes(image.Spec.Size)); err != nil {
-		return false, fmt.Errorf("failed to resize rbd image: %w", err)
-	}
-	log.V(2).Info("Resized cloned image", "bytes", image.Spec.Size)
-
-	r.Eventf(image.Metadata, corev1.EventTypeNormal, "CreateImageFromSnapshotSucceeded", "CreateImageFromSnapshot", "Created image from snapshot. bytes: %d", image.Spec.Size)
 	return true, nil
+}
+
+func (r *ImageReconciler) deleteImage(ctx context.Context, log logr.Logger, image *api.Image) error {
+	if !slices.Contains(image.Finalizers, imageFinalizer) {
+		log.V(1).Info("Image has no finalizer: done")
+		return nil
+	}
+
+	if len(image.Finalizers) > 1 {
+		log.V(1).Info("Image has too many finalizers: waiting")
+		return nil
+	}
+
+	ioCtx, err := r.conn.OpenIOContext(r.pool)
+	if err != nil {
+		return fmt.Errorf("unable to get RADOS IOContext: %w", err)
+	}
+	defer ioCtx.Destroy()
+
+	if err := librbd.RemoveImage(ioCtx, image.ID); err != nil && !errors.Is(err, librbd.ErrNotFound) {
+		return fmt.Errorf("failed to remove RBD image %s: %w", image.ID, err)
+	}
+	log.Info("RBD image removed")
+
+	// Remove finalizer from source snapshot. The RBD child image has been deleted,
+	// so it should not block snapshot deletion anymore
+	if image.Spec.SnapshotSource != nil {
+		snapshot, err := r.snapshotStore.Get(ctx, *image.Spec.SnapshotSource)
+		if err != nil {
+			if !errors.Is(err, store.ErrNotFound) {
+				return fmt.Errorf("failed to get source snapshot from store: %w", err)
+			}
+			log.V(1).Info("Source snapshot already deleted", "snapshotId", *image.Spec.SnapshotSource)
+		} else {
+			sourceSnapshotFinalizer := fmt.Sprintf("%s/%s", imageFinalizer, image.ID)
+			if _, removed, err := removeFinalizer(ctx, r.snapshotStore, snapshot, sourceSnapshotFinalizer); err != nil {
+				return fmt.Errorf("failed to remove finalizer from source snapshot: %w", err)
+			} else if removed {
+				log.V(1).Info("Removed finalizer from source snapshot", "snapshotId", snapshot.ID)
+			}
+		}
+	}
+
+	if _, removed, err := removeFinalizer(ctx, r.imageStore, image, imageFinalizer); store.IgnoreErrNotFound(err) != nil {
+		return fmt.Errorf("failed to update image metadata: %w", err)
+	} else if removed {
+		log.V(1).Info("Removed finalizer")
+	}
+	return nil
+}
+
+type fetchAuthResponse struct {
+	Key string `json:"key"`
+}
+
+func fetchAuth(client string, conn *rados.Conn) (string, string, error) {
+	cmd, err := json.Marshal(map[string]string{
+		"prefix": "auth get-key",
+		"entity": client,
+		"format": "json",
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("unable to marshal mon command: %w", err)
+	}
+
+	data, _, err := conn.MonCommand(cmd)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to execute mon command: %w", err)
+	}
+
+	response := fetchAuthResponse{}
+	if err := json.Unmarshal(data, &response); err != nil {
+		return "", "", fmt.Errorf("unable to unmarshal mon response: %w", err)
+	}
+
+	return strings.TrimPrefix(client, "client."), response.Key, nil
+}
+
+func equalAccess(a, b *api.ImageAccess) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Monitors == b.Monitors &&
+		a.Handle == b.Handle &&
+		a.User == b.User &&
+		a.UserKey == b.UserKey
 }

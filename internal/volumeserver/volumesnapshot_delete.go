@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: SAP SE or an SAP affiliate company and IronCore contributors
+// SPDX-FileCopyrightText: 2024 SAP SE or an SAP affiliate company and IronCore contributors
 // SPDX-License-Identifier: Apache-2.0
 
 package volumeserver
@@ -10,6 +10,7 @@ import (
 
 	"github.com/ironcore-dev/ceph-provider/internal/utils"
 	iri "github.com/ironcore-dev/ironcore/iri/apis/volume/v1alpha1"
+	"github.com/ironcore-dev/provider-utils/storeutils/store"
 )
 
 func (s *Server) DeleteVolumeSnapshot(ctx context.Context, req *iri.DeleteVolumeSnapshotRequest) (*iri.DeleteVolumeSnapshotResponse, error) {
@@ -17,7 +18,7 @@ func (s *Server) DeleteVolumeSnapshot(ctx context.Context, req *iri.DeleteVolume
 
 	log.V(1).Info("Deleting volume snapshot")
 	if err := s.snapshotStore.Delete(ctx, req.VolumeSnapshotId); err != nil {
-		if !errors.Is(err, utils.ErrSnapshotNotFound) {
+		if !errors.Is(err, store.ErrNotFound) {
 			return nil, fmt.Errorf("error deleting volume snapshot: %w", err)
 		}
 		return nil, utils.ConvertInternalErrorToGRPC(fmt.Errorf("failed to delete volume snapshot %s: %w", req.VolumeSnapshotId, utils.ErrSnapshotNotFound))

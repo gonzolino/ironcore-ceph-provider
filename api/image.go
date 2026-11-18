@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: SAP SE or an SAP affiliate company and IronCore contributors
+// SPDX-FileCopyrightText: 2023 SAP SE or an SAP affiliate company and IronCore contributors
 // SPDX-License-Identifier: Apache-2.0
 
 package api
@@ -8,18 +8,18 @@ import (
 )
 
 const (
-	ImageSpecSnapshotRefField = "spec.snapshotRef"
+	ImageSpecSnapshotSourceField = "spec.snapshotSource"
 )
 
-func SetupImageSpecSnapshotRefFieldIndexer(img *Image) string {
-	if img.Spec.SnapshotRef != nil {
-		return *img.Spec.SnapshotRef
+func SetupImageSpecSnapshotSourceFieldIndexer(image *Image) string {
+	if image.Spec.SnapshotSource != nil {
+		return *image.Spec.SnapshotSource
 	}
 	return ""
 }
 
 type Image struct {
-	apiutils.Metadata `json:"metadata,omitempty"`
+	apiutils.Metadata `json:"metadata"`
 
 	Spec   ImageSpec   `json:"spec"`
 	Status ImageStatus `json:"status"`
@@ -39,13 +39,12 @@ const (
 )
 
 type ImageSpec struct {
-	Size              uint64          `json:"size"`
-	WWN               string          `json:"wwn"`
-	Limits            Limits          `json:"limits"`
-	Image             string          `json:"image"`
-	ImageArchitecture *string         `json:"imageArchitecture"`
-	SnapshotRef       *string         `json:"snapshotRef"`
-	Encryption        *EncryptionSpec `json:"encryption"`
+	Size       uint64         `json:"size"`
+	WWN        string         `json:"wwn"`
+	Limits     Limits         `json:"limits"`
+	Encryption EncryptionSpec `json:"encryption"`
+
+	SnapshotSource *string `json:"snapshotSource"`
 }
 
 type EncryptionType string

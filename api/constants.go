@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: SAP SE or an SAP affiliate company and IronCore contributors
+// SPDX-FileCopyrightText: 2022 SAP SE or an SAP affiliate company and IronCore contributors
 // SPDX-License-Identifier: Apache-2.0
 
 package api
@@ -12,4 +12,9 @@ const (
 	VolumeManager         = "ceph-volume-provider"
 
 	MachineArchitectureLabel = "common.ironcore.dev/architecture"
+)
+
+const (
+	// VolumeImageIDPrefix is the prefix used for the image ID created for a volume.
+	VolumeImageIDPrefix = "vol-"
 )

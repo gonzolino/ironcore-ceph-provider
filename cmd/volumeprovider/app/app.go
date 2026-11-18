@@ -13,17 +13,14 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/ironcore-dev/brokers/common"
-	providerapi "github.com/ironcore-dev/ceph-provider/api"
-	apiv2 "github.com/ironcore-dev/ceph-provider/api/v2"
+	"github.com/ironcore-dev/ceph-provider/api"
 	"github.com/ironcore-dev/ceph-provider/internal/ceph"
 	"github.com/ironcore-dev/ceph-provider/internal/controllers"
-	controllersv2 "github.com/ironcore-dev/ceph-provider/internal/controllers/v2"
 	"github.com/ironcore-dev/ceph-provider/internal/encryption"
 	"github.com/ironcore-dev/ceph-provider/internal/omap"
 	"github.com/ironcore-dev/ceph-provider/internal/strategy"
 	"github.com/ironcore-dev/ceph-provider/internal/vcr"
 	"github.com/ironcore-dev/ceph-provider/internal/volumeserver"
-	volumeserverv2 "github.com/ironcore-dev/ceph-provider/internal/volumeserver/v2"
 	"github.com/ironcore-dev/ironcore-image/oci/remote"
 	iriv1alpha1 "github.com/ironcore-dev/ironcore/iri/apis/volume/v1alpha1"
 	"github.com/ironcore-dev/provider-utils/eventutils/event"
@@ -41,8 +38,6 @@ type Options struct {
 	Address string
 
 	PathSupportedVolumeClasses string
-
-	EnableV2 bool
 
 	Ceph CephOptions
 }
@@ -83,8 +78,6 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.Address, "address", "/var/run/iri-volumeprovider.sock", "Address to listen on.")
 
 	fs.StringVar(&o.PathSupportedVolumeClasses, "supported-volume-classes", o.PathSupportedVolumeClasses, "File containing supported volume classes.")
-
-	fs.BoolVar(&o.EnableV2, "enable-v2", false, "Enable v2 volume-centric API and controllers.")
 
 	fs.Int64Var(&o.Ceph.BurstFactor, "limits-burst-factor", o.Ceph.BurstFactor, "Defines the factor to calculate the burst limits.")
 	fs.Int64Var(&o.Ceph.BurstDurationInSeconds, "limits-burst-duration", o.Ceph.BurstDurationInSeconds, "Defines the burst duration in seconds.")
@@ -219,125 +212,9 @@ func Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("configuration invalid: %w", err)
 	}
 
-	setupLog.Info("Configuring image store", "OmapName", omap.LegacyNameVolumes)
-	imageStore, err := omap.New(log.WithName("image-events"), conn, opts.Ceph.Pool, omap.Options[*providerapi.Image]{
-		OmapName:       omap.LegacyNameVolumes,
-		NewFunc:        func() *providerapi.Image { return &providerapi.Image{} },
-		CreateStrategy: strategy.ImageStrategy,
-		IteratorSize:   opts.Ceph.OmapIteratorSize,
-		FieldIndexers: map[string]store.IndexerFunc[*providerapi.Image]{
-			providerapi.ImageSpecSnapshotRefField: providerapi.SetupImageSpecSnapshotRefFieldIndexer,
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("failed to initialize image store: %w", err)
-	}
-
-	imageEvents, err := event.NewListWatchSource[*providerapi.Image](
-		imageStore.List,
-		imageStore.Watch,
-		event.ListWatchSourceOptions{},
-	)
-	if err != nil {
-		return fmt.Errorf("failed to initialize image events: %w", err)
-	}
-
-	setupLog.Info("Configuring snapshot store", "OmapName", omap.LegacyNameSnapshots)
-	snapshotStore, err := omap.New(log.WithName("snapshot-events"), conn, opts.Ceph.Pool, omap.Options[*providerapi.Snapshot]{
-		OmapName:       omap.LegacyNameSnapshots,
-		NewFunc:        func() *providerapi.Snapshot { return &providerapi.Snapshot{} },
-		CreateStrategy: strategy.SnapshotStrategy,
-		IteratorSize:   opts.Ceph.OmapIteratorSize,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to initialize snapshot store: %w", err)
-	}
-
-	snapshotEvents, err := event.NewListWatchSource[*providerapi.Snapshot](
-		snapshotStore.List,
-		snapshotStore.Watch,
-		event.ListWatchSourceOptions{},
-	)
-	if err != nil {
-		return fmt.Errorf("failed to initialize snapshot events: %w", err)
-	}
-
 	volumeEventStore := eventrecorder.NewEventStore(log, opts.Ceph.VolumeEventStoreOptions)
 
 	g, ctx := errgroup.WithContext(ctx)
-
-	if !opts.EnableV2 {
-		imageReconciler, err := controllers.NewImageReconciler(
-			log.WithName("image-reconciler"),
-			conn,
-			imageStore, snapshotStore,
-			volumeEventStore,
-			imageEvents,
-			snapshotEvents,
-			encryptor,
-			controllers.ImageReconcilerOptions{
-				Monitors:   opts.Ceph.Monitors,
-				Client:     opts.Ceph.Client,
-				Pool:       opts.Ceph.Pool,
-				WorkerSize: opts.Ceph.WorkerSize,
-			},
-		)
-		if err != nil {
-			return fmt.Errorf("failed to initialize image reconciler: %w", err)
-		}
-
-		g.Go(func() error {
-			setupLog.Info("Starting image reconciler")
-			if err := imageReconciler.Start(ctx); err != nil {
-				setupLog.Error(err, "failed to start image reconciler")
-				return err
-			}
-			return nil
-		})
-
-		snapshotReconciler, err := controllers.NewSnapshotReconciler(
-			log.WithName("snapshot-reconciler"),
-			conn,
-			snapshotStore,
-			imageStore,
-			snapshotEvents,
-			controllers.SnapshotReconcilerOptions{
-				Pool:                opts.Ceph.Pool,
-				PopulatorBufferSize: opts.Ceph.PopulatorBufferSize,
-				WorkerSize:          opts.Ceph.WorkerSize,
-			},
-		)
-		if err != nil {
-			return fmt.Errorf("failed to initialize snapshot reconciler: %w", err)
-		}
-
-		g.Go(func() error {
-			setupLog.Info("Starting snapshot reconciler")
-			if err := snapshotReconciler.Start(ctx); err != nil {
-				setupLog.Error(err, "failed to start snapshot reconciler")
-				return err
-			}
-			return nil
-		})
-
-		g.Go(func() error {
-			setupLog.Info("Starting image events")
-			if err := imageEvents.Start(ctx); err != nil {
-				setupLog.Error(err, "failed to start image events")
-				return err
-			}
-			return nil
-		})
-
-		g.Go(func() error {
-			setupLog.Info("Starting snapshot events")
-			if err := snapshotEvents.Start(ctx); err != nil {
-				setupLog.Error(err, "failed to start snapshot events")
-				return err
-			}
-			return nil
-		})
-	}
 
 	g.Go(func() error {
 		setupLog.Info("Starting volume events garbage collector")
@@ -362,286 +239,265 @@ func Run(ctx context.Context, opts Options) error {
 
 	var iriServer iriv1alpha1.VolumeRuntimeServer
 
-	if opts.EnableV2 {
-		setupLog.Info("V2 mode enabled: configuring volume-centric pipeline")
-
-		setupLog.Info("Configuring v2 volume store", "OmapName", omap.NameVolumes)
-		volumeStore, err := omap.New(log, conn, opts.Ceph.Pool, omap.Options[*apiv2.Volume]{
-			OmapName:       omap.NameVolumes,
-			NewFunc:        func() *apiv2.Volume { return &apiv2.Volume{} },
-			CreateStrategy: strategy.VolumeStrategy,
-			IteratorSize:   opts.Ceph.OmapIteratorSize,
-			FieldIndexers: map[string]store.IndexerFunc[*apiv2.Volume]{
-				apiv2.VolumeStatusImageRefField:           apiv2.SetupVolumeStatusImageRefFieldIndexer,
-				apiv2.VolumeSpecSourceOSImageField:        apiv2.SetupVolumeSpecSourceOSImageFieldIndexer,
-				apiv2.VolumeSpecSourceSnapshotSourceField: apiv2.SetupVolumeSpecSourceSnapshotFieldIndexer,
-			},
-		})
-		if err != nil {
-			return fmt.Errorf("failed to initialize v2 volume store: %w", err)
-		}
-
-		volumeEvents, err := event.NewListWatchSource[*apiv2.Volume](
-			volumeStore.List,
-			volumeStore.Watch,
-			event.ListWatchSourceOptions{},
-		)
-		if err != nil {
-			return fmt.Errorf("failed to initialize volume events: %w", err)
-		}
-
-		v2ImageStore, err := omap.New(log, conn, opts.Ceph.Pool, omap.Options[*apiv2.Image]{
-			OmapName:       omap.NameImages,
-			NewFunc:        func() *apiv2.Image { return &apiv2.Image{} },
-			CreateStrategy: strategy.ImageV2Strategy,
-			IteratorSize:   opts.Ceph.OmapIteratorSize,
-			FieldIndexers: map[string]store.IndexerFunc[*apiv2.Image]{
-				apiv2.ImageSpecSnapshotSourceField: apiv2.SetupImageSpecSnapshotSourceFieldIndexer,
-			},
-		})
-		if err != nil {
-			return fmt.Errorf("failed to initialize v2 image store: %w", err)
-		}
-
-		v2ImageEvents, err := event.NewListWatchSource[*apiv2.Image](
-			v2ImageStore.List,
-			v2ImageStore.Watch,
-			event.ListWatchSourceOptions{},
-		)
-		if err != nil {
-			return fmt.Errorf("failed to initialize v2 image events: %w", err)
-		}
-
-		v2SnapshotStore, err := omap.New(log, conn, opts.Ceph.Pool, omap.Options[*apiv2.Snapshot]{
-			OmapName:       omap.NameSnapshots,
-			NewFunc:        func() *apiv2.Snapshot { return &apiv2.Snapshot{} },
-			CreateStrategy: strategy.SnapshotV2Strategy,
-			IteratorSize:   opts.Ceph.OmapIteratorSize,
-			FieldIndexers: map[string]store.IndexerFunc[*apiv2.Snapshot]{
-				apiv2.SnapshotSpecImageRefField: apiv2.SetupSnapshotSpecImageRefFieldIndexer,
-			},
-		})
-		if err != nil {
-			return fmt.Errorf("failed to initialize v2 snapshot store: %w", err)
-		}
-
-		v2SnapshotEvents, err := event.NewListWatchSource[*apiv2.Snapshot](
-			v2SnapshotStore.List,
-			v2SnapshotStore.Watch,
-			event.ListWatchSourceOptions{},
-		)
-		if err != nil {
-			return fmt.Errorf("failed to initialize v2 snapshot events: %w", err)
-		}
-
-		setupLog.Info("Configuring v2 os image store", "OmapName", omap.NameOSImages)
-		osImageStore, err := omap.New(log, conn, opts.Ceph.Pool, omap.Options[*apiv2.OSImage]{
-			OmapName:       omap.NameOSImages,
-			NewFunc:        func() *apiv2.OSImage { return &apiv2.OSImage{} },
-			CreateStrategy: strategy.OSImageStrategy,
-			IteratorSize:   opts.Ceph.OmapIteratorSize,
-		})
-		if err != nil {
-			return fmt.Errorf("failed to initialize v2 os image store: %w", err)
-		}
-
-		osImageEvents, err := event.NewListWatchSource[*apiv2.OSImage](
-			osImageStore.List,
-			osImageStore.Watch,
-			event.ListWatchSourceOptions{},
-		)
-		if err != nil {
-			return fmt.Errorf("failed to initialize v2 os image events: %w", err)
-		}
-
-		ociRegistry, err := remote.DockerRegistry()
-		if err != nil {
-			return fmt.Errorf("failed to initialize OCI registry: %w", err)
-		}
-
-		volumeReconciler, err := controllersv2.NewVolumeReconciler(
-			log.WithName("volume-reconciler"),
-			ociRegistry,
-			v2SnapshotStore,
-			v2ImageStore,
-			osImageStore,
-			volumeStore,
-			volumeEvents,
-			v2ImageEvents,
-			osImageEvents,
-			v2SnapshotEvents,
-			controllersv2.VolumeReconcilerOptions{
-				WorkerSize: opts.Ceph.WorkerSize,
-			},
-		)
-		if err != nil {
-			return fmt.Errorf("failed to initialize volume reconciler: %w", err)
-		}
-
-		g.Go(func() error {
-			setupLog.Info("Starting v2 volume reconciler")
-			if err := volumeReconciler.Start(ctx); err != nil {
-				setupLog.Error(err, "failed to start volume reconciler")
-				return err
-			}
-			return nil
-		})
-
-		imageReconciler, err := controllersv2.NewImageReconciler(
-			log.WithName("image-reconciler"),
-			conn,
-			v2ImageStore,
-			v2SnapshotStore,
-			v2ImageEvents,
-			v2SnapshotEvents,
-			encryptor,
-			controllersv2.ImageReconcilerOptions{
-				Monitors:            opts.Ceph.Monitors,
-				Client:              opts.Ceph.Client,
-				Pool:                opts.Ceph.Pool,
-				PopulatorBufferSize: opts.Ceph.PopulatorBufferSize,
-				WorkerSize:          opts.Ceph.WorkerSize,
-			},
-		)
-		if err != nil {
-			return fmt.Errorf("failed to initialize v2 image reconciler: %w", err)
-		}
-
-		g.Go(func() error {
-			setupLog.Info("Starting v2 image reconciler")
-			if err := imageReconciler.Start(ctx); err != nil {
-				setupLog.Error(err, "failed to start v2 image reconciler")
-				return err
-			}
-			return nil
-		})
-
-		snapshotReconciler, err := controllersv2.NewSnapshotReconciler(
-			log.WithName("snapshot-reconciler"),
-			conn,
-			v2SnapshotStore,
-			v2ImageStore,
-			v2SnapshotEvents,
-			v2ImageEvents,
-			controllersv2.SnapshotReconcilerOptions{
-				Pool:       opts.Ceph.Pool,
-				WorkerSize: opts.Ceph.WorkerSize,
-			},
-		)
-		if err != nil {
-			return fmt.Errorf("failed to initialize v2 snapshot reconciler: %w", err)
-		}
-
-		g.Go(func() error {
-			setupLog.Info("Starting v2 snapshot reconciler")
-			if err := snapshotReconciler.Start(ctx); err != nil {
-				setupLog.Error(err, "failed to start v2 snapshot reconciler")
-				return err
-			}
-			return nil
-		})
-
-		osImageReconciler, err := controllersv2.NewOSImageReconciler(
-			log.WithName("os-image-reconciler"),
-			conn,
-			osImageStore,
-			v2ImageStore,
-			v2SnapshotStore,
-			osImageEvents,
-			v2ImageEvents,
-			v2SnapshotEvents,
-			controllersv2.OSImageReconcilerOptions{
-				Monitors:            opts.Ceph.Monitors,
-				Client:              opts.Ceph.Client,
-				Pool:                opts.Ceph.Pool,
-				PopulatorBufferSize: opts.Ceph.PopulatorBufferSize,
-				WorkerSize:          opts.Ceph.WorkerSize,
-			},
-		)
-		if err != nil {
-			return fmt.Errorf("failed to initialize v2 os image reconciler: %w", err)
-		}
-
-		g.Go(func() error {
-			setupLog.Info("Starting v2 os image reconciler")
-			if err := osImageReconciler.Start(ctx); err != nil {
-				setupLog.Error(err, "failed to start v2 os image reconciler")
-				return err
-			}
-			return nil
-		})
-
-		g.Go(func() error {
-			setupLog.Info("Starting v2 volume events")
-			if err := volumeEvents.Start(ctx); err != nil {
-				setupLog.Error(err, "failed to start volume events")
-				return err
-			}
-			return nil
-		})
-
-		g.Go(func() error {
-			setupLog.Info("Starting v2 image events")
-			if err := v2ImageEvents.Start(ctx); err != nil {
-				setupLog.Error(err, "failed to start v2 image events")
-				return err
-			}
-			return nil
-		})
-
-		g.Go(func() error {
-			setupLog.Info("Starting v2 snapshot events")
-			if err := v2SnapshotEvents.Start(ctx); err != nil {
-				setupLog.Error(err, "failed to start v2 snapshot events")
-				return err
-			}
-			return nil
-		})
-
-		g.Go(func() error {
-			setupLog.Info("Starting v2 os image events")
-			if err := osImageEvents.Start(ctx); err != nil {
-				setupLog.Error(err, "failed to start v2 os image events")
-				return err
-			}
-			return nil
-		})
-
-		srv, err := volumeserverv2.New(
-			volumeStore,
-			osImageStore,
-			v2SnapshotStore,
-			classRegistry,
-			encryptor,
-			cephCommandClient,
-			volumeserverv2.Options{
-				VolumeEventStore:       volumeEventStore,
-				BurstFactor:            opts.Ceph.BurstFactor,
-				BurstDurationInSeconds: opts.Ceph.BurstDurationInSeconds,
-			},
-		)
-		if err != nil {
-			return fmt.Errorf("error creating v2 server: %w", err)
-		}
-		iriServer = srv
-	} else {
-		srv, err := volumeserver.New(
-			imageStore,
-			snapshotStore,
-			classRegistry,
-			encryptor,
-			cephCommandClient,
-			volumeserver.Options{
-				VolumeEventStore:       volumeEventStore,
-				BurstFactor:            opts.Ceph.BurstFactor,
-				BurstDurationInSeconds: opts.Ceph.BurstDurationInSeconds,
-			},
-		)
-		if err != nil {
-			return fmt.Errorf("error creating server: %w", err)
-		}
-		iriServer = srv
+	setupLog.Info("Configuring volume store", "OmapName", omap.NameVolumes)
+	volumeStore, err := omap.New(log, conn, opts.Ceph.Pool, omap.Options[*api.Volume]{
+		OmapName:       omap.NameVolumes,
+		NewFunc:        func() *api.Volume { return &api.Volume{} },
+		CreateStrategy: strategy.VolumeStrategy,
+		IteratorSize:   opts.Ceph.OmapIteratorSize,
+		FieldIndexers: map[string]store.IndexerFunc[*api.Volume]{
+			api.VolumeStatusImageRefField:           api.SetupVolumeStatusImageRefFieldIndexer,
+			api.VolumeSpecSourceOSImageField:        api.SetupVolumeSpecSourceOSImageFieldIndexer,
+			api.VolumeSpecSourceSnapshotSourceField: api.SetupVolumeSpecSourceSnapshotFieldIndexer,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to initialize volume store: %w", err)
 	}
+
+	volumeEvents, err := event.NewListWatchSource[*api.Volume](
+		volumeStore.List,
+		volumeStore.Watch,
+		event.ListWatchSourceOptions{},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to initialize volume events: %w", err)
+	}
+
+	imageStore, err := omap.New(log, conn, opts.Ceph.Pool, omap.Options[*api.Image]{
+		OmapName:       omap.NameImages,
+		NewFunc:        func() *api.Image { return &api.Image{} },
+		CreateStrategy: strategy.ImageStrategy,
+		IteratorSize:   opts.Ceph.OmapIteratorSize,
+		FieldIndexers: map[string]store.IndexerFunc[*api.Image]{
+			api.ImageSpecSnapshotSourceField: api.SetupImageSpecSnapshotSourceFieldIndexer,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to initialize image store: %w", err)
+	}
+
+	imageEvents, err := event.NewListWatchSource[*api.Image](
+		imageStore.List,
+		imageStore.Watch,
+		event.ListWatchSourceOptions{},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to initialize image events: %w", err)
+	}
+
+	snapshotStore, err := omap.New(log, conn, opts.Ceph.Pool, omap.Options[*api.Snapshot]{
+		OmapName:       omap.NameSnapshots,
+		NewFunc:        func() *api.Snapshot { return &api.Snapshot{} },
+		CreateStrategy: strategy.SnapshotStrategy,
+		IteratorSize:   opts.Ceph.OmapIteratorSize,
+		FieldIndexers: map[string]store.IndexerFunc[*api.Snapshot]{
+			api.SnapshotSpecImageRefField: api.SetupSnapshotSpecImageRefFieldIndexer,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to initialize snapshot store: %w", err)
+	}
+
+	snapshotEvents, err := event.NewListWatchSource[*api.Snapshot](
+		snapshotStore.List,
+		snapshotStore.Watch,
+		event.ListWatchSourceOptions{},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to initialize snapshot events: %w", err)
+	}
+
+	setupLog.Info("Configuring os image store", "OmapName", omap.NameOSImages)
+	osImageStore, err := omap.New(log, conn, opts.Ceph.Pool, omap.Options[*api.OSImage]{
+		OmapName:       omap.NameOSImages,
+		NewFunc:        func() *api.OSImage { return &api.OSImage{} },
+		CreateStrategy: strategy.OSImageStrategy,
+		IteratorSize:   opts.Ceph.OmapIteratorSize,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to initialize os image store: %w", err)
+	}
+
+	osImageEvents, err := event.NewListWatchSource[*api.OSImage](
+		osImageStore.List,
+		osImageStore.Watch,
+		event.ListWatchSourceOptions{},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to initialize os image events: %w", err)
+	}
+
+	ociRegistry, err := remote.DockerRegistry()
+	if err != nil {
+		return fmt.Errorf("failed to initialize OCI registry: %w", err)
+	}
+
+	volumeReconciler, err := controllers.NewVolumeReconciler(
+		log.WithName("volume-reconciler"),
+		ociRegistry,
+		snapshotStore,
+		imageStore,
+		osImageStore,
+		volumeStore,
+		volumeEvents,
+		imageEvents,
+		osImageEvents,
+		snapshotEvents,
+		controllers.VolumeReconcilerOptions{
+			WorkerSize: opts.Ceph.WorkerSize,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to initialize volume reconciler: %w", err)
+	}
+
+	g.Go(func() error {
+		setupLog.Info("Starting volume reconciler")
+		if err := volumeReconciler.Start(ctx); err != nil {
+			setupLog.Error(err, "failed to start volume reconciler")
+			return err
+		}
+		return nil
+	})
+
+	imageReconciler, err := controllers.NewImageReconciler(
+		log.WithName("image-reconciler"),
+		conn,
+		imageStore,
+		snapshotStore,
+		imageEvents,
+		snapshotEvents,
+		encryptor,
+		controllers.ImageReconcilerOptions{
+			Monitors:            opts.Ceph.Monitors,
+			Client:              opts.Ceph.Client,
+			Pool:                opts.Ceph.Pool,
+			PopulatorBufferSize: opts.Ceph.PopulatorBufferSize,
+			WorkerSize:          opts.Ceph.WorkerSize,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to initialize image reconciler: %w", err)
+	}
+
+	g.Go(func() error {
+		setupLog.Info("Starting image reconciler")
+		if err := imageReconciler.Start(ctx); err != nil {
+			setupLog.Error(err, "failed to start image reconciler")
+			return err
+		}
+		return nil
+	})
+
+	snapshotReconciler, err := controllers.NewSnapshotReconciler(
+		log.WithName("snapshot-reconciler"),
+		conn,
+		snapshotStore,
+		imageStore,
+		snapshotEvents,
+		imageEvents,
+		controllers.SnapshotReconcilerOptions{
+			Pool:       opts.Ceph.Pool,
+			WorkerSize: opts.Ceph.WorkerSize,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to initialize snapshot reconciler: %w", err)
+	}
+
+	g.Go(func() error {
+		setupLog.Info("Starting snapshot reconciler")
+		if err := snapshotReconciler.Start(ctx); err != nil {
+			setupLog.Error(err, "failed to start snapshot reconciler")
+			return err
+		}
+		return nil
+	})
+
+	osImageReconciler, err := controllers.NewOSImageReconciler(
+		log.WithName("os-image-reconciler"),
+		conn,
+		osImageStore,
+		imageStore,
+		snapshotStore,
+		osImageEvents,
+		imageEvents,
+		snapshotEvents,
+		controllers.OSImageReconcilerOptions{
+			Monitors:            opts.Ceph.Monitors,
+			Client:              opts.Ceph.Client,
+			Pool:                opts.Ceph.Pool,
+			PopulatorBufferSize: opts.Ceph.PopulatorBufferSize,
+			WorkerSize:          opts.Ceph.WorkerSize,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to initialize os image reconciler: %w", err)
+	}
+
+	g.Go(func() error {
+		setupLog.Info("Starting os image reconciler")
+		if err := osImageReconciler.Start(ctx); err != nil {
+			setupLog.Error(err, "failed to start os image reconciler")
+			return err
+		}
+		return nil
+	})
+
+	g.Go(func() error {
+		setupLog.Info("Starting volume events")
+		if err := volumeEvents.Start(ctx); err != nil {
+			setupLog.Error(err, "failed to start volume events")
+			return err
+		}
+		return nil
+	})
+
+	g.Go(func() error {
+		setupLog.Info("Starting image events")
+		if err := imageEvents.Start(ctx); err != nil {
+			setupLog.Error(err, "failed to start image events")
+			return err
+		}
+		return nil
+	})
+
+	g.Go(func() error {
+		setupLog.Info("Starting snapshot events")
+		if err := snapshotEvents.Start(ctx); err != nil {
+			setupLog.Error(err, "failed to start snapshot events")
+			return err
+		}
+		return nil
+	})
+
+	g.Go(func() error {
+		setupLog.Info("Starting os image events")
+		if err := osImageEvents.Start(ctx); err != nil {
+			setupLog.Error(err, "failed to start os image events")
+			return err
+		}
+		return nil
+	})
+
+	srv, err := volumeserver.New(
+		volumeStore,
+		osImageStore,
+		snapshotStore,
+		classRegistry,
+		encryptor,
+		cephCommandClient,
+		volumeserver.Options{
+			VolumeEventStore:       volumeEventStore,
+			BurstFactor:            opts.Ceph.BurstFactor,
+			BurstDurationInSeconds: opts.Ceph.BurstDurationInSeconds,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("error creating server: %w", err)
+	}
+	iriServer = srv
 
 	g.Go(func() error {
 		setupLog.Info("Starting grpc server")

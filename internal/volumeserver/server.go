@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: SAP SE or an SAP affiliate company and IronCore contributors
+// SPDX-FileCopyrightText: 2024 SAP SE or an SAP affiliate company and IronCore contributors
 // SPDX-License-Identifier: Apache-2.0
 
 package volumeserver
@@ -7,7 +7,7 @@ import (
 	"context"
 
 	"github.com/go-logr/logr"
-	"github.com/ironcore-dev/ceph-provider/api"
+	api2 "github.com/ironcore-dev/ceph-provider/api"
 	"github.com/ironcore-dev/ceph-provider/internal/ceph"
 	"github.com/ironcore-dev/ceph-provider/internal/encryption"
 	iri "github.com/ironcore-dev/ironcore/iri/apis/volume/v1alpha1"
@@ -26,8 +26,9 @@ type Server struct {
 	iri.UnimplementedVolumeRuntimeServer
 	idGen idgen.IDGen
 
-	imageStore       store.Store[*api.Image]
-	snapshotStore    store.Store[*api.Snapshot]
+	volumeStore      store.Store[*api2.Volume]
+	osImageStore     store.Store[*api2.OSImage]
+	snapshotStore    store.Store[*api2.Snapshot]
 	volumeEventStore recorder.EventStore
 
 	volumeClasses     VolumeClassRegistry
@@ -60,19 +61,21 @@ func setOptionsDefaults(o *Options) {
 
 var _ iri.VolumeRuntimeServer = (*Server)(nil)
 
-func New(imageStore store.Store[*api.Image],
-	snapshotStore store.Store[*api.Snapshot],
+func New(
+	volumeStore store.Store[*api2.Volume],
+	osImageStore store.Store[*api2.OSImage],
+	snapshotStore store.Store[*api2.Snapshot],
 	volumeClassRegistry VolumeClassRegistry,
 	keyEncryption encryption.Encryptor,
 	cephCommandClient ceph.Command,
 	opts Options,
 ) (*Server, error) {
-
 	setOptionsDefaults(&opts)
 
 	return &Server{
 		idGen:            opts.IDGen,
-		imageStore:       imageStore,
+		volumeStore:      volumeStore,
+		osImageStore:     osImageStore,
 		snapshotStore:    snapshotStore,
 		volumeEventStore: opts.VolumeEventStore,
 		volumeClasses:    volumeClassRegistry,

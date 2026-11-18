@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: SAP SE or an SAP affiliate company and IronCore contributors
+// SPDX-FileCopyrightText: 2024 SAP SE or an SAP affiliate company and IronCore contributors
 // SPDX-License-Identifier: Apache-2.0
 
 package volumeserver
@@ -8,27 +8,26 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/ironcore-dev/ceph-provider/api"
+	api2 "github.com/ironcore-dev/ceph-provider/api"
 	"github.com/ironcore-dev/ceph-provider/internal/utils"
 	iri "github.com/ironcore-dev/ironcore/iri/apis/volume/v1alpha1"
-	"github.com/ironcore-dev/provider-utils/storeutils/store"
 	"k8s.io/apimachinery/pkg/labels"
 )
 
-func (s *Server) getIriVolume(ctx context.Context, imageId string) (*iri.Volume, error) {
-	cephImage, err := s.imageStore.Get(ctx, imageId)
+func (s *Server) getIriVolume(ctx context.Context, volumeID string) (*iri.Volume, error) {
+	volume, err := s.volumeStore.Get(ctx, volumeID)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return nil, fmt.Errorf("failed to get image %s: %w", imageId, store.ErrNotFound)
+		if errors.Is(err, utils.ErrVolumeNotFound) {
+			return nil, fmt.Errorf("failed to get volume %s: %w", volumeID, utils.ErrVolumeNotFound)
 		}
-		return nil, fmt.Errorf("failed to get image: %w", err)
+		return nil, fmt.Errorf("failed to get volume: %w", err)
 	}
 
-	if !api.IsObjectManagedBy(cephImage, api.VolumeManager) {
-		return nil, fmt.Errorf("failed to get image %s: %w", imageId, utils.ErrVolumeIsntManaged)
+	if !api2.IsObjectManagedBy(volume, api2.VolumeManager) {
+		return nil, fmt.Errorf("failed to get volume %s: %w", volumeID, utils.ErrVolumeIsntManaged)
 	}
 
-	return s.convertImageToIriVolume(cephImage)
+	return s.convertVolumeToIRI(volume)
 }
 
 func (s *Server) filterVolumes(volumes []*iri.Volume, filter *iri.VolumeFilter) []*iri.Volume {
@@ -51,14 +50,18 @@ func (s *Server) filterVolumes(volumes []*iri.Volume, filter *iri.VolumeFilter) 
 }
 
 func (s *Server) listVolumes(ctx context.Context) ([]*iri.Volume, error) {
-	cephImages, err := s.imageStore.List(ctx, store.MatchingLabels{api.ManagerLabel: api.VolumeManager})
+	volumes, err := s.volumeStore.List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("error listing volumes: %w", err)
 	}
 
 	var res []*iri.Volume
-	for _, cephImage := range cephImages {
-		iriVolume, err := s.convertImageToIriVolume(cephImage)
+	for _, volume := range volumes {
+		if !api2.IsObjectManagedBy(volume, api2.VolumeManager) {
+			continue
+		}
+
+		iriVolume, err := s.convertVolumeToIRI(volume)
 		if err != nil {
 			return nil, err
 		}
@@ -69,9 +72,6 @@ func (s *Server) listVolumes(ctx context.Context) ([]*iri.Volume, error) {
 }
 
 func (s *Server) ListVolumes(ctx context.Context, req *iri.ListVolumesRequest) (*iri.ListVolumesResponse, error) {
-	log := s.loggerFrom(ctx)
-	log.V(2).Info("Listing volumes")
-
 	if filter := req.Filter; filter != nil && filter.Id != "" {
 		volume, err := s.getIriVolume(ctx, filter.Id)
 		if err != nil {
@@ -95,7 +95,6 @@ func (s *Server) ListVolumes(ctx context.Context, req *iri.ListVolumesRequest) (
 
 	volumes = s.filterVolumes(volumes, req.Filter)
 
-	log.V(2).Info("Returning volumes list")
 	return &iri.ListVolumesResponse{
 		Volumes: volumes,
 	}, nil

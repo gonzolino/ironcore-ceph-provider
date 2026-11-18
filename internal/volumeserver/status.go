@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: SAP SE or an SAP affiliate company and IronCore contributors
+// SPDX-FileCopyrightText: 2024 SAP SE or an SAP affiliate company and IronCore contributors
 // SPDX-License-Identifier: Apache-2.0
 
 package volumeserver
@@ -28,7 +28,7 @@ func (s *Server) Status(ctx context.Context, req *iri.StatusRequest) (*iri.Statu
 	for _, volumeClass := range volumeClassList {
 		volumeClassStatus = append(volumeClassStatus, &iri.VolumeClassStatus{
 			VolumeClass: volumeClass,
-			Quantity:    poolStats.MaxAvail + poolStats.Stored,
+			Quantity:    poolStats.MaxAvail,
 		})
 	}
 

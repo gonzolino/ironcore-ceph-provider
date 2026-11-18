@@ -1,41 +1,137 @@
-// SPDX-FileCopyrightText: SAP SE or an SAP affiliate company and IronCore contributors
+// SPDX-FileCopyrightText: 2024 SAP SE or an SAP affiliate company and IronCore contributors
 // SPDX-License-Identifier: Apache-2.0
 
 package volumeserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/go-logr/logr"
-	"github.com/ironcore-dev/ceph-provider/api"
+	api2 "github.com/ironcore-dev/ceph-provider/api"
 	"github.com/ironcore-dev/ceph-provider/internal/limits"
 	"github.com/ironcore-dev/ceph-provider/internal/utils"
+	"github.com/ironcore-dev/controller-utils/metautils"
 	iriv1alpha1 "github.com/ironcore-dev/ironcore/iri/apis/volume/v1alpha1"
 	apiutils "github.com/ironcore-dev/provider-utils/apiutils/api"
-	"k8s.io/utils/ptr"
+	"github.com/ironcore-dev/provider-utils/storeutils/store"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"oras.land/oras-go/v2"
+	"oras.land/oras-go/v2/registry"
+	"oras.land/oras-go/v2/registry/remote"
 )
 
 const (
 	EncryptionSecretDataPassphraseKey = "encryptionKey"
 )
 
-func (s *Server) createImageFromVolume(ctx context.Context, log logr.Logger, volume *iriv1alpha1.Volume) (*api.Image, error) {
-	if volume == nil {
-		return nil, fmt.Errorf("got an empty volume")
+func (s *Server) createOrGetOSImage(ctx context.Context, log logr.Logger, iriVolume *iriv1alpha1.Volume) (*api2.OSImage, error) {
+	// Skip OSImage creation if no image data source is specified
+	dataSource := iriVolume.Spec.VolumeDataSource
+	if dataSource == nil {
+		return nil, nil
+	}
+	imageSource := dataSource.ImageDataSource
+	if imageSource == nil {
+		return nil, nil
 	}
 
-	var err error
-	var imageSize uint64
-	var encryptionSpec *api.EncryptionSpec
-	log.V(2).Info("Getting image size and encryption from IRI volume")
-	if volume.Spec.Resources != nil {
-		if imageSize, err = utils.Int64ToUint64(volume.Spec.Resources.StorageBytes); err != nil {
-			return nil, fmt.Errorf("failed to get image size: %w", err)
+	if imageSource.Image == "" {
+		return nil, fmt.Errorf("must specify image url in image data source")
+	}
+	imageRef, err := registry.ParseReference(imageSource.Image)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse image source: %w", err)
+	}
+	imageRefName := imageRef.String()
+
+	var imageArch string
+	if arch := imageSource.Architecture; arch != "" {
+		imageArch = arch
+	} else if iriVolume.Metadata != nil {
+		if a, ok := iriVolume.Metadata.Labels[api2.MachineArchitectureLabel]; ok {
+			imageArch = a
 		}
 	}
 
-	if encryption := volume.Spec.Encryption; encryption != nil {
+	// Resolve digest for architecture from image reference, as OS images are architecture-specific.
+	imageDigest, err := imageRef.Digest()
+	if err != nil {
+		// If the image reference does not contain a digest, it must be resolved from the repository.
+		repo, err := remote.NewRepository(imageRefName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create remote image repository: %w", err)
+		}
+		log.V(2).Info("Resolve OCI reference for OS image", "reference", imageRefName, "architecture", imageArch)
+		desc, err := oras.Resolve(ctx, repo, imageRef.Reference, oras.ResolveOptions{
+			TargetPlatform: &ocispec.Platform{OS: "linux", Architecture: imageArch},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve image reference: %w", err)
+		}
+		imageDigest = desc.Digest
+	}
+	osImageID := imageDigest.Encoded()
+	imageRef.Reference = imageDigest.String()
+
+	osImage, err := s.osImageStore.Get(ctx, osImageID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return nil, fmt.Errorf("failed to get OS image from store: %w", err)
+	}
+	if err == nil {
+		log.V(2).Info("OS image already exists in store", "OSImageId", osImage.ID)
+		return osImage, nil
+	}
+
+	log.V(1).Info("Creating OS image", "OSImageId", osImageID)
+	osImage = &api2.OSImage{
+		Metadata: apiutils.Metadata{
+			ID: osImageID,
+		},
+		Spec: api2.OSImageSpec{
+			Source: api2.OSImageSource{
+				Reference: imageRef.String(),
+			},
+		},
+	}
+
+	log.V(2).Info("Setting OS image metadata")
+	api2.SetManagerLabel(osImage, api2.VolumeManager)
+
+	// TODO: Is this the right set of labels to attach to an OS image? Is there something missing? OR should we move some of them to annotations?
+	metautils.SetAnnotations(osImage, map[string]string{
+		"architecture":  imageArch,
+		"os":            "linux",
+		"oci-reference": imageRefName,
+		"digest":        imageRef.Reference,
+	})
+
+	log.V(2).Info("Creating OS image in store")
+	osImage, err = s.osImageStore.Create(ctx, osImage)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create OS image: %w", err)
+	}
+
+	log.V(2).Info("OS image created", "OSImageID", osImage.ID)
+	return osImage, nil
+}
+
+func (s *Server) createVolumeFromIRI(ctx context.Context, log logr.Logger, iriVolume *iriv1alpha1.Volume) (*api2.Volume, error) {
+	if iriVolume == nil {
+		return nil, fmt.Errorf("got an empty volume")
+	}
+
+	var imageSize uint64
+	var err error
+	if iriVolume.Spec.Resources != nil {
+		if imageSize, err = utils.Int64ToUint64(iriVolume.Spec.Resources.StorageBytes); err != nil {
+			return nil, fmt.Errorf("failed to get volume size: %w", err)
+		}
+	}
+
+	var encryptionSpec api2.VolumeEncryptionSpec
+	if encryption := iriVolume.Spec.Encryption; encryption != nil {
 		if encryption.SecretData == nil {
 			return nil, fmt.Errorf("encryption enabled but SecretData missing")
 		}
@@ -48,122 +144,82 @@ func (s *Server) createImageFromVolume(ctx context.Context, log logr.Logger, vol
 		if err != nil {
 			return nil, fmt.Errorf("failed to encrypt passphrase: %w", err)
 		}
-		encryptionSpec = &api.EncryptionSpec{
-			Type:                api.EncryptionTypeEncrypted,
+		encryptionSpec = api2.VolumeEncryptionSpec{
+			Type:                api2.VolumeEncryptionTypeEncrypted,
 			EncryptedPassphrase: encryptedPassphrase,
 		}
 	}
 
-	log.V(2).Info("Getting volume data source")
-	var (
-		volImage   string
-		volArch    *string
-		snapshotID *string
-	)
-	if dataSource := volume.Spec.VolumeDataSource; dataSource != nil {
+	log.V(2).Info("Getting volume class")
+	class, found := s.volumeClasses.Get(iriVolume.Spec.Class)
+	if !found {
+		return nil, fmt.Errorf("volume class '%s' not supported", iriVolume.Spec.Class)
+	}
+
+	log.V(2).Info("Getting volume limits")
+	calculatedLimits := limits.CalculateV2(class.Capabilities.Iops, class.Capabilities.Tps, s.burstFactor, s.burstDurationInSeconds)
+
+	var source api2.VolumeSource
+	if dataSource := iriVolume.Spec.VolumeDataSource; dataSource != nil {
 		switch {
 		case dataSource.SnapshotDataSource != nil:
-			snapshotID = &dataSource.SnapshotDataSource.SnapshotId
-			log.V(2).Info("Getting snapshot data source", "snapshotID", snapshotID)
-			snapshot, err := s.snapshotStore.Get(ctx, *snapshotID)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get volume snapshot from store: %w", err)
-			}
-
-			if snapshot.Source.VolumeImageID == "" {
-				return nil, fmt.Errorf("snapshot doesn't have source volume ID")
-			}
-
-			var snapshotSourceVolume *api.Image
-			if snapshotSourceVolume, err = s.imageStore.Get(ctx, snapshot.Source.VolumeImageID); err != nil {
-				return nil, fmt.Errorf("failed to get snapshot source volume from store: %w", err)
-			}
-
-			snapshotSize := snapshotSourceVolume.Spec.Size
-			// Validate and determine final size
-			if imageSize == 0 {
-				// No size specified by user, use snapshot size
-				log.V(2).Info("Getting image size from snapshot source volume", "snapshotSourceVolumeID", snapshotSourceVolume.ID)
-				imageSize = snapshotSize
-			} else if imageSize < snapshotSize {
-				// User specified size is too small
-				return nil, fmt.Errorf("requested size (%d bytes) must not be smaller than snapshot restore size (%d bytes)", imageSize, snapshotSize)
-			}
-
+			snapshotID := dataSource.SnapshotDataSource.SnapshotId
+			source.Snapshot = &snapshotID
 		case dataSource.ImageDataSource != nil:
-			volImage = dataSource.ImageDataSource.Image
-			log.V(2).Info("Getting image data source", "imageID", volImage)
-			if volImage == "" {
-				return nil, fmt.Errorf("must specify image url in image data source")
+			osImage, err := s.createOrGetOSImage(ctx, log, iriVolume)
+			if err != nil || osImage == nil {
+				return nil, fmt.Errorf("failed to create OS image: %w", err)
 			}
-			if imageSize == 0 {
-				return nil, fmt.Errorf("must specify size when creating volume from image data source")
-			}
-			if dataSource.ImageDataSource.Architecture != "" {
-				volArch = ptr.To(dataSource.ImageDataSource.Architecture)
-			}
-
+			source.OSImage = &osImage.ID
 		default:
 			return nil, fmt.Errorf("unsupported or incomplete volume data source type")
 		}
 	}
 
-	log.V(2).Info("Getting volume class")
-	class, found := s.volumeClasses.Get(volume.Spec.Class)
-	if !found {
-		return nil, fmt.Errorf("volume class '%s' not supported", volume.Spec.Class)
-	}
-
-	log.V(2).Info("Getting volume limits")
-	calculatedLimits := limits.Calculate(class.Capabilities.Iops, class.Capabilities.Tps, s.burstFactor, s.burstDurationInSeconds)
-
-	image := &api.Image{
+	volume := &api2.Volume{
 		Metadata: apiutils.Metadata{
 			ID: s.idGen.Generate(),
 		},
-		Spec: api.ImageSpec{
-			Size:              imageSize,
-			Limits:            calculatedLimits,
-			Image:             volImage,
-			ImageArchitecture: volArch,
-			SnapshotRef:       snapshotID,
-			Encryption:        encryptionSpec,
+		Spec: api2.VolumeSpec{
+			Size:             imageSize,
+			Limits:           calculatedLimits,
+			VolumeEncryption: encryptionSpec,
+			Source:           source,
 		},
 	}
 
-	log.V(2).Info("Setting volume metadata to image")
-	if err := api.SetObjectMetadataFromMetadata(image, volume.Metadata); err != nil {
+	log.V(2).Info("Setting volume metadata")
+	if err := api2.SetObjectMetadataFromMetadata(volume, iriVolume.Metadata); err != nil {
 		return nil, fmt.Errorf("failed to set metadata: %w", err)
 	}
-	api.SetClassLabelForObject(image, volume.Spec.Class)
-	api.SetManagerLabel(image, api.VolumeManager)
+	api2.SetClassLabelForObject(volume, iriVolume.Spec.Class)
+	api2.SetManagerLabel(volume, api2.VolumeManager)
 
-	log.V(2).Info("Creating image in store")
-	image, err = s.imageStore.Create(ctx, image)
+	log.V(2).Info("Creating volume in store")
+	volume, err = s.volumeStore.Create(ctx, volume)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create image: %w", err)
+		return nil, fmt.Errorf("failed to create volume: %w", err)
 	}
 
-	log.V(2).Info("Image created", "ImageID", image.ID)
-	return image, nil
+	log.V(2).Info("Volume created", "VolumeID", volume.ID)
+	return volume, nil
 }
 
-func (s *Server) CreateVolume(ctx context.Context, req *iriv1alpha1.CreateVolumeRequest) (res *iriv1alpha1.CreateVolumeResponse, retErr error) {
+func (s *Server) CreateVolume(ctx context.Context, req *iriv1alpha1.CreateVolumeRequest) (*iriv1alpha1.CreateVolumeResponse, error) {
 	log := s.loggerFrom(ctx)
 	log.V(1).Info("Creating volume")
 
-	log.V(1).Info("Creating Ceph image from volume")
-	image, err := s.createImageFromVolume(ctx, log, req.Volume)
+	volume, err := s.createVolumeFromIRI(ctx, log, req.Volume)
 	if err != nil {
-		return nil, utils.ConvertInternalErrorToGRPC(fmt.Errorf("unable to create ceph volume: %w", err))
+		return nil, utils.ConvertInternalErrorToGRPC(fmt.Errorf("unable to create volume: %w", err))
 	}
 
-	log = log.WithValues("ImageID", image.ID)
+	log = log.WithValues("VolumeID", volume.ID)
 
-	log.V(1).Info("Converting image to IRI volume")
-	iriVolume, err := s.convertImageToIriVolume(image)
+	log.V(1).Info("Converting volume to IRI volume")
+	iriVolume, err := s.convertVolumeToIRI(volume)
 	if err != nil {
-		return nil, utils.ConvertInternalErrorToGRPC(fmt.Errorf("unable to create ceph volume: %w", err))
+		return nil, utils.ConvertInternalErrorToGRPC(fmt.Errorf("unable to convert volume: %w", err))
 	}
 
 	log.V(1).Info("Volume created", "Volume", iriVolume.Metadata.Id, "State", iriVolume.Status.State)

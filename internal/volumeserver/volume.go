@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: SAP SE or an SAP affiliate company and IronCore contributors
+// SPDX-FileCopyrightText: 2024 SAP SE or an SAP affiliate company and IronCore contributors
 // SPDX-License-Identifier: Apache-2.0
 
 package volumeserver
@@ -6,7 +6,7 @@ package volumeserver
 import (
 	"fmt"
 
-	"github.com/ironcore-dev/ceph-provider/api"
+	api2 "github.com/ironcore-dev/ceph-provider/api"
 	"github.com/ironcore-dev/ceph-provider/internal/utils"
 	iri "github.com/ironcore-dev/ironcore/iri/apis/volume/v1alpha1"
 )
@@ -19,31 +19,39 @@ const (
 	DriverName  = "ceph"
 )
 
-func (s *Server) convertImageToIriVolume(image *api.Image) (*iri.Volume, error) {
-	metadata, err := api.GetObjectMetadataFromObjectID(image.Metadata)
+func (s *Server) convertVolumeToIRI(volume *api2.Volume) (*iri.Volume, error) {
+	metadata, err := api2.GetObjectMetadataFromObjectID(volume.Metadata)
 	if err != nil {
 		return nil, fmt.Errorf("error getting iri metadata: %w", err)
 	}
 
-	spec, err := s.getIriVolumeSpec(image)
+	spec, err := s.getIriVolumeSpec(volume)
 	if err != nil {
-		return nil, fmt.Errorf("error getting iri resources: %w", err)
+		return nil, fmt.Errorf("error getting iri spec: %w", err)
 	}
 
-	state, err := s.getIriState(image.Status.State)
+	state, err := s.getIriState(volume.Status.State)
 	if err != nil {
 		return nil, fmt.Errorf("error getting iri state: %w", err)
 	}
 
 	var access *iri.VolumeAccess
-	if state == iri.VolumeState_VOLUME_AVAILABLE {
-		access, err = s.getIriVolumeAccess(image)
-		if err != nil {
-			return nil, fmt.Errorf("error getting iri volume access: %w", err)
+	if state == iri.VolumeState_VOLUME_AVAILABLE && volume.Status.Access != nil {
+		access = &iri.VolumeAccess{
+			Driver: DriverName,
+			Handle: volume.Status.Access.WWN,
+			Attributes: map[string]string{
+				MonitorsKey: volume.Status.Access.Monitors,
+				ImageKey:    volume.Status.Access.Handle,
+			},
+			SecretData: map[string][]byte{
+				UserIDKey:  []byte(volume.Status.Access.User),
+				UserKeyKey: []byte(volume.Status.Access.UserKey),
+			},
 		}
 	}
 
-	imageSize, err := utils.Uint64ToInt64(image.Status.Size)
+	volumeSize, err := utils.Uint64ToInt64(volume.Status.Size)
 	if err != nil {
 		return nil, err
 	}
@@ -55,34 +63,14 @@ func (s *Server) convertImageToIriVolume(image *api.Image) (*iri.Volume, error) 
 			State:  state,
 			Access: access,
 			Resources: &iri.VolumeResources{
-				StorageBytes: imageSize,
+				StorageBytes: volumeSize,
 			},
 		},
 	}, nil
 }
 
-func (s *Server) getIriVolumeAccess(image *api.Image) (*iri.VolumeAccess, error) {
-	access := image.Status.Access
-	if access == nil {
-		return nil, fmt.Errorf("image access not present")
-	}
-
-	return &iri.VolumeAccess{
-		Driver: DriverName,
-		Handle: image.Spec.WWN,
-		Attributes: map[string]string{
-			MonitorsKey: access.Monitors,
-			ImageKey:    access.Handle,
-		},
-		SecretData: map[string][]byte{
-			UserIDKey:  []byte(access.User),
-			UserKeyKey: []byte(access.UserKey),
-		},
-	}, nil
-}
-
-func (s *Server) getIriVolumeSpec(image *api.Image) (*iri.VolumeSpec, error) {
-	storageBytes, err := utils.Uint64ToInt64(image.Spec.Size)
+func (s *Server) getIriVolumeSpec(volume *api2.Volume) (*iri.VolumeSpec, error) {
+	storageBytes, err := utils.Uint64ToInt64(volume.Spec.Size)
 	if err != nil {
 		return nil, err
 	}
@@ -93,20 +81,20 @@ func (s *Server) getIriVolumeSpec(image *api.Image) (*iri.VolumeSpec, error) {
 		},
 	}
 
-	class, ok := api.GetClassLabelFromObject(image)
+	class, ok := api2.GetClassLabelFromObject(volume)
 	if !ok {
-		return nil, fmt.Errorf("failed to get volume class for image: %s", image.ID)
+		return nil, fmt.Errorf("failed to get volume class for volume: %s", volume.ID)
 	}
 	spec.Class = class
 
 	return spec, nil
 }
 
-func (s *Server) getIriState(state api.ImageState) (iri.VolumeState, error) {
+func (s *Server) getIriState(state api2.VolumeState) (iri.VolumeState, error) {
 	switch state {
-	case api.ImageStateAvailable:
+	case api2.VolumeStateAvailable:
 		return iri.VolumeState_VOLUME_AVAILABLE, nil
-	case api.ImageStatePending:
+	case api2.VolumeStatePending:
 		return iri.VolumeState_VOLUME_PENDING, nil
 	default:
 		return 0, fmt.Errorf("unknown volume state '%q'", state)

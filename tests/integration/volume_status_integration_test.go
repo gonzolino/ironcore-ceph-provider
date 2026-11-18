@@ -61,14 +61,14 @@ var _ = Describe("Volume Status", func() {
 			HaveField("Volume.Spec.Class", Equal("foo")),
 		))
 
-		By("ensuring correct iops and tps/bps in Ceph cluster image specs")
-		image := &api.Image{}
-		Eventually(func() *api.Image {
-			oMap, err := ioctx.GetOmapValues(omap.LegacyNameVolumes, "", createResp.Volume.Metadata.Id, 10)
+		By("ensuring correct iops and tps/bps in Ceph cluster volume specs")
+		volume := &api.Volume{}
+		Eventually(func() *api.Volume {
+			oMap, err := ioctx.GetOmapValues(omap.NameVolumes, "", createResp.Volume.Metadata.Id, 10)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(oMap).To(HaveKey(createResp.Volume.Metadata.Id))
-			Expect(json.Unmarshal(oMap[createResp.Volume.Metadata.Id], image)).NotTo(HaveOccurred())
-			return image
+			Expect(json.Unmarshal(oMap[createResp.Volume.Metadata.Id], volume)).NotTo(HaveOccurred())
+			return volume
 		}).Should(SatisfyAll(
 			HaveField("Metadata.ID", Equal(createResp.Volume.Metadata.Id)),
 			HaveField("Metadata.Labels", HaveKeyWithValue(api.ClassLabel, "foo")),

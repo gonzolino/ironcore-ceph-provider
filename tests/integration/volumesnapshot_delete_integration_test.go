@@ -36,17 +36,17 @@ var _ = Describe("Delete VolumeSnapshot", func() {
 			VolumeId: createResp.Volume.Metadata.Id,
 		})
 
-		By("ensuring image has been created in volumes store")
-		image := &api.Image{}
-		Eventually(ctx, func() *api.Image {
-			oMap, err := ioctx.GetOmapValues(omap.LegacyNameVolumes, "", createResp.Volume.Metadata.Id, 10)
+		By("ensuring volume has been created in volumes store")
+		volume := &api.Volume{}
+		Eventually(ctx, func() *api.Volume {
+			oMap, err := ioctx.GetOmapValues(omap.NameVolumes, "", createResp.Volume.Metadata.Id, 10)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(oMap).To(HaveKey(createResp.Volume.Metadata.Id))
-			Expect(json.Unmarshal(oMap[createResp.Volume.Metadata.Id], image)).NotTo(HaveOccurred())
-			return image
+			Expect(json.Unmarshal(oMap[createResp.Volume.Metadata.Id], volume)).NotTo(HaveOccurred())
+			return volume
 		}).Should(SatisfyAll(
 			HaveField("Metadata.ID", Equal(createResp.Volume.Metadata.Id)),
-			HaveField("Status.State", Equal(api.ImageStateAvailable)),
+			HaveField("Status.State", Equal(api.VolumeStateAvailable)),
 		))
 
 		By("ensuring volume is in available state")
@@ -81,7 +81,7 @@ var _ = Describe("Delete VolumeSnapshot", func() {
 		By("ensuring snapshot has been created in snapshot store")
 		snapshot := &api.Snapshot{}
 		Eventually(ctx, func() *api.Snapshot {
-			oMap, err := ioctx.GetOmapValues(omap.LegacyNameSnapshots, "", snapshotID, 10)
+			oMap, err := ioctx.GetOmapValues(omap.NameSnapshots, "", snapshotID, 10)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(oMap).To(HaveKey(snapshotID))
 			Expect(json.Unmarshal(oMap[snapshotID], snapshot)).NotTo(HaveOccurred())
@@ -128,7 +128,7 @@ var _ = Describe("Delete VolumeSnapshot", func() {
 
 		By("ensuring the image has been deleted from snapshot store")
 		Eventually(func() {
-			oMap, err := ioctx.GetOmapValues(omap.LegacyNameSnapshots, "", snapshotID, 10)
+			oMap, err := ioctx.GetOmapValues(omap.NameSnapshots, "", snapshotID, 10)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(oMap).NotTo(HaveKey(snapshotID))
 		})

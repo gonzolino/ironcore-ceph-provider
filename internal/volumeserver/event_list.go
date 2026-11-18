@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: SAP SE or an SAP affiliate company and IronCore contributors
+// SPDX-FileCopyrightText: 2024 SAP SE or an SAP affiliate company and IronCore contributors
 // SPDX-License-Identifier: Apache-2.0
 
 package volumeserver
@@ -8,7 +8,7 @@ import (
 	"fmt"
 
 	"github.com/go-logr/logr"
-	"github.com/ironcore-dev/ceph-provider/api"
+	api2 "github.com/ironcore-dev/ceph-provider/api"
 	"github.com/ironcore-dev/ceph-provider/internal/utils"
 	irievent "github.com/ironcore-dev/ironcore/iri/apis/event/v1alpha1"
 	iri "github.com/ironcore-dev/ironcore/iri/apis/volume/v1alpha1"
@@ -27,7 +27,7 @@ func (s *Server) filterEvents(log logr.Logger, events []*recorder.Event, filter 
 		sel = labels.SelectorFromSet(filter.LabelSelector)
 	)
 	for _, iriEvent := range events {
-		originLabel, err := apiutils.GetLabelsAnnotation(iriEvent.InvolvedObjectMeta, api.LabelsAnnotation)
+		originLabel, err := apiutils.GetLabelsAnnotation(iriEvent.InvolvedObjectMeta, api2.LabelsAnnotation)
 		if err != nil {
 			log.V(1).Info("Failed to get Labels from iriEvent")
 			continue
@@ -49,12 +49,10 @@ func (s *Server) filterEvents(log logr.Logger, events []*recorder.Event, filter 
 }
 
 func (s *Server) convertEventToIriEvent(events []*recorder.Event) ([]*irievent.Event, error) {
-	var (
-		res []*irievent.Event
-	)
+	var res []*irievent.Event
 
 	for _, event := range events {
-		metadata, err := api.GetObjectMetadata(event.InvolvedObjectMeta)
+		metadata, err := api2.GetObjectMetadata(event.InvolvedObjectMeta)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get object metadata: %w", err)
 		}
@@ -64,7 +62,6 @@ func (s *Server) convertEventToIriEvent(events []*recorder.Event) ([]*irievent.E
 				Reason:             event.Reason,
 				Message:            event.Message,
 				Type:               event.Type,
-				Action:             event.Action,
 				EventTime:          event.EventTime,
 			},
 		})

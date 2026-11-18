@@ -34,17 +34,17 @@ var _ = Describe("List VolumeSnapshot", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		volumeId := createVolumeResp.Volume.Metadata.Id
-		By("ensuring the image has been created in volumes store")
-		image := &api.Image{}
-		Eventually(func() *api.Image {
-			oMap, err := ioctx.GetOmapValues(omap.LegacyNameVolumes, "", volumeId, 10)
+		By("ensuring the volume has been created in volumes store")
+		volume := &api.Volume{}
+		Eventually(func() *api.Volume {
+			oMap, err := ioctx.GetOmapValues(omap.NameVolumes, "", volumeId, 10)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(oMap).To(HaveKey(volumeId))
-			Expect(json.Unmarshal(oMap[volumeId], image)).NotTo(HaveOccurred())
-			return image
+			Expect(json.Unmarshal(oMap[volumeId], volume)).NotTo(HaveOccurred())
+			return volume
 		}).Should(SatisfyAll(
 			HaveField("Metadata.ID", Equal(volumeId)),
-			HaveField("Status.State", Equal(api.ImageStateAvailable)),
+			HaveField("Status.State", Equal(api.VolumeStateAvailable)),
 		))
 
 		DeferCleanup(volumeClient.DeleteVolume, &iriv1alpha1.DeleteVolumeRequest{
@@ -69,7 +69,7 @@ var _ = Describe("List VolumeSnapshot", func() {
 		By("ensuring snapshot has been created in snapshot store")
 		snapshot := &api.Snapshot{}
 		Eventually(ctx, func() *api.Snapshot {
-			oMap, err := ioctx.GetOmapValues(omap.LegacyNameSnapshots, "", snapshotID, 10)
+			oMap, err := ioctx.GetOmapValues(omap.NameSnapshots, "", snapshotID, 10)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(oMap).To(HaveKey(snapshotID))
 			Expect(json.Unmarshal(oMap[snapshotID], snapshot)).NotTo(HaveOccurred())
@@ -117,7 +117,7 @@ var _ = Describe("List VolumeSnapshot", func() {
 		By("ensuring snapshot has been created in snapshot store")
 		snapshot1 := &api.Snapshot{}
 		Eventually(ctx, func() *api.Snapshot {
-			oMap, err := ioctx.GetOmapValues(omap.LegacyNameSnapshots, "", snapshotID, 10)
+			oMap, err := ioctx.GetOmapValues(omap.NameSnapshots, "", snapshotID, 10)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(oMap).To(HaveKey(snapshotID))
 			Expect(json.Unmarshal(oMap[snapshotID], snapshot1)).NotTo(HaveOccurred())

@@ -11,7 +11,7 @@ import (
 	"sync"
 
 	"github.com/go-logr/logr"
-	providerapi "github.com/ironcore-dev/ceph-provider/api/v2"
+	"github.com/ironcore-dev/ceph-provider/api"
 	"github.com/ironcore-dev/ironcore-image/oci/image"
 	apiutils "github.com/ironcore-dev/provider-utils/apiutils/api"
 	"github.com/ironcore-dev/provider-utils/eventutils/event"
@@ -26,14 +26,14 @@ type VolumeReconcilerOptions struct {
 func NewVolumeReconciler(
 	log logr.Logger,
 	registry image.Source,
-	snapshotStore store.Store[*providerapi.Snapshot],
-	imageStore store.Store[*providerapi.Image],
-	osImageStore store.Store[*providerapi.OSImage],
-	volumeStore store.Store[*providerapi.Volume],
-	events event.Source[*providerapi.Volume],
-	imageEvents event.Source[*providerapi.Image],
-	osImageEvents event.Source[*providerapi.OSImage],
-	snapshotEvents event.Source[*providerapi.Snapshot],
+	snapshotStore store.Store[*api.Snapshot],
+	imageStore store.Store[*api.Image],
+	osImageStore store.Store[*api.OSImage],
+	volumeStore store.Store[*api.Volume],
+	events event.Source[*api.Volume],
+	imageEvents event.Source[*api.Image],
+	osImageEvents event.Source[*api.OSImage],
+	snapshotEvents event.Source[*api.Snapshot],
 	opts VolumeReconcilerOptions,
 ) (*VolumeReconciler, error) {
 	if registry == nil {
@@ -98,15 +98,15 @@ type VolumeReconciler struct {
 	registry image.Source
 	queue    workqueue.TypedRateLimitingInterface[string]
 
-	snapshotStore store.Store[*providerapi.Snapshot]
-	imageStore    store.Store[*providerapi.Image]
-	osImageStore  store.Store[*providerapi.OSImage]
-	volumeStore   store.Store[*providerapi.Volume]
+	snapshotStore store.Store[*api.Snapshot]
+	imageStore    store.Store[*api.Image]
+	osImageStore  store.Store[*api.OSImage]
+	volumeStore   store.Store[*api.Volume]
 
-	events         event.Source[*providerapi.Volume]
-	imageEvents    event.Source[*providerapi.Image]
-	osImageEvents  event.Source[*providerapi.OSImage]
-	snapshotEvents event.Source[*providerapi.Snapshot]
+	events         event.Source[*api.Volume]
+	imageEvents    event.Source[*api.Image]
+	osImageEvents  event.Source[*api.OSImage]
+	snapshotEvents event.Source[*api.Snapshot]
 
 	workerSize int
 }
@@ -114,7 +114,7 @@ type VolumeReconciler struct {
 func (r *VolumeReconciler) Start(ctx context.Context) error {
 	log := r.log
 
-	reg, err := r.events.AddHandler(event.HandlerFunc[*providerapi.Volume](func(event event.Event[*providerapi.Volume]) {
+	reg, err := r.events.AddHandler(event.HandlerFunc[*api.Volume](func(event event.Event[*api.Volume]) {
 		r.queue.Add(event.Object.ID)
 	}))
 	if err != nil {
@@ -124,8 +124,8 @@ func (r *VolumeReconciler) Start(ctx context.Context) error {
 		_ = r.events.RemoveHandler(reg)
 	}()
 
-	imageReg, err := r.imageEvents.AddHandler(event.HandlerFunc[*providerapi.Image](func(evt event.Event[*providerapi.Image]) {
-		if evt.Type == event.TypeDeleted || (evt.Type == event.TypeUpdated && evt.Object.Status.State != providerapi.ImageStatePending) {
+	imageReg, err := r.imageEvents.AddHandler(event.HandlerFunc[*api.Image](func(evt event.Event[*api.Image]) {
+		if evt.Type == event.TypeDeleted || (evt.Type == event.TypeUpdated && evt.Object.Status.State != api.ImageStatePending) {
 			r.requeueVolumesForImage(ctx, evt.Object.ID)
 		}
 	}))
@@ -136,8 +136,8 @@ func (r *VolumeReconciler) Start(ctx context.Context) error {
 		_ = r.imageEvents.RemoveHandler(imageReg)
 	}()
 
-	osImgEventReg, err := r.osImageEvents.AddHandler(event.HandlerFunc[*providerapi.OSImage](func(evt event.Event[*providerapi.OSImage]) {
-		if evt.Type == event.TypeDeleted || (evt.Type == event.TypeUpdated && evt.Object.Status.State != providerapi.OSImageStatePending) {
+	osImgEventReg, err := r.osImageEvents.AddHandler(event.HandlerFunc[*api.OSImage](func(evt event.Event[*api.OSImage]) {
+		if evt.Type == event.TypeDeleted || (evt.Type == event.TypeUpdated && evt.Object.Status.State != api.OSImageStatePending) {
 			r.requeueVolumesForOSImage(ctx, evt.Object.ID)
 		}
 	}))
@@ -148,8 +148,8 @@ func (r *VolumeReconciler) Start(ctx context.Context) error {
 		_ = r.osImageEvents.RemoveHandler(osImgEventReg)
 	}()
 
-	snapshotReg, err := r.snapshotEvents.AddHandler(event.HandlerFunc[*providerapi.Snapshot](func(evt event.Event[*providerapi.Snapshot]) {
-		if evt.Type == event.TypeDeleted || (evt.Type == event.TypeUpdated && evt.Object.Status.State != providerapi.SnapshotStatePending) {
+	snapshotReg, err := r.snapshotEvents.AddHandler(event.HandlerFunc[*api.Snapshot](func(evt event.Event[*api.Snapshot]) {
+		if evt.Type == event.TypeDeleted || (evt.Type == event.TypeUpdated && evt.Object.Status.State != api.SnapshotStatePending) {
 			r.requeueVolumesForSnapshot(ctx, evt.Object.ID)
 		}
 	}))
@@ -180,7 +180,7 @@ func (r *VolumeReconciler) Start(ctx context.Context) error {
 }
 
 func (r *VolumeReconciler) requeueVolumesForImage(ctx context.Context, imageID string) {
-	volumes, err := r.volumeStore.List(ctx, store.MatchingFields{providerapi.VolumeStatusImageRefField: imageID})
+	volumes, err := r.volumeStore.List(ctx, store.MatchingFields{api.VolumeStatusImageRefField: imageID})
 	if err != nil {
 		r.log.Error(err, "failed to list volumes for image event requeue")
 		return
@@ -191,7 +191,7 @@ func (r *VolumeReconciler) requeueVolumesForImage(ctx context.Context, imageID s
 }
 
 func (r *VolumeReconciler) requeueVolumesForOSImage(ctx context.Context, osImageID string) {
-	volumes, err := r.volumeStore.List(ctx, store.MatchingFields{providerapi.VolumeSpecSourceOSImageField: osImageID})
+	volumes, err := r.volumeStore.List(ctx, store.MatchingFields{api.VolumeSpecSourceOSImageField: osImageID})
 	if err != nil {
 		r.log.Error(err, "failed to list volumes for OS image event requeue")
 		return
@@ -202,7 +202,7 @@ func (r *VolumeReconciler) requeueVolumesForOSImage(ctx context.Context, osImage
 }
 
 func (r *VolumeReconciler) requeueVolumesForSnapshot(ctx context.Context, snapshotID string) {
-	volumes, err := r.volumeStore.List(ctx, store.MatchingFields{providerapi.VolumeSpecSourceSnapshotSourceField: snapshotID})
+	volumes, err := r.volumeStore.List(ctx, store.MatchingFields{api.VolumeSpecSourceSnapshotSourceField: snapshotID})
 	if err != nil {
 		r.log.Error(err, "failed to list volumes for snapshot event requeue")
 		return
@@ -302,10 +302,10 @@ func (r *VolumeReconciler) reconcileVolume(ctx context.Context, id string) error
 
 	// Image exists, reconcile its state before syncing the volume.
 	switch img.Status.State {
-	case providerapi.ImageStatePending:
+	case api.ImageStatePending:
 		log.Info("Image is pending, waiting", "imageId", img.ID)
 		return nil
-	case providerapi.ImageStateAvailable:
+	case api.ImageStateAvailable:
 		log.V(1).Info("Image is available", "imageId", img.ID)
 	default:
 		return fmt.Errorf("image %s in unexpected state: %s", img.ID, img.Status.State)
@@ -320,9 +320,9 @@ func (r *VolumeReconciler) reconcileVolume(ctx context.Context, id string) error
 	}
 
 	// Reconcile volume status from the settled image status.
-	var desiredAccess *providerapi.VolumeAccess
+	var desiredAccess *api.VolumeAccess
 	if img.Status.Access != nil {
-		desiredAccess = &providerapi.VolumeAccess{
+		desiredAccess = &api.VolumeAccess{
 			Monitors: img.Status.Access.Monitors,
 			Handle:   img.Status.Access.Handle,
 			WWN:      img.Spec.WWN,
@@ -330,12 +330,12 @@ func (r *VolumeReconciler) reconcileVolume(ctx context.Context, id string) error
 			UserKey:  img.Status.Access.UserKey,
 		}
 	}
-	desiredEncryption := providerapi.VolumeEncryptionState("")
-	if img.Status.Encryption == providerapi.EncryptionStateHeaderSet {
-		desiredEncryption = providerapi.VolumeEncryptionStateHeaderSet
+	desiredEncryption := api.VolumeEncryptionState("")
+	if img.Status.Encryption == api.EncryptionStateHeaderSet {
+		desiredEncryption = api.VolumeEncryptionStateHeaderSet
 	}
 
-	needsUpdate := volume.Status.State != providerapi.VolumeStateAvailable ||
+	needsUpdate := volume.Status.State != api.VolumeStateAvailable ||
 		volume.Status.Size != img.Status.Size ||
 		volume.Status.VolumeEncryption != desiredEncryption ||
 		!volumeAccessEqual(volume.Status.Access, desiredAccess)
@@ -346,7 +346,7 @@ func (r *VolumeReconciler) reconcileVolume(ctx context.Context, id string) error
 	}
 
 	log.Info("Image is available, updating volume status", "imageId", img.ID)
-	volume.Status.State = providerapi.VolumeStateAvailable
+	volume.Status.State = api.VolumeStateAvailable
 	volume.Status.Size = img.Status.Size
 	volume.Status.VolumeEncryption = desiredEncryption
 	volume.Status.Access = desiredAccess
@@ -356,7 +356,7 @@ func (r *VolumeReconciler) reconcileVolume(ctx context.Context, id string) error
 	return nil
 }
 
-func (r *VolumeReconciler) setVolumeImageRef(ctx context.Context, volume *providerapi.Volume, imageID string) error {
+func (r *VolumeReconciler) setVolumeImageRef(ctx context.Context, volume *api.Volume, imageID string) error {
 	if volume.Status.ImageRef == imageID {
 		return nil
 	}
@@ -369,7 +369,7 @@ func (r *VolumeReconciler) setVolumeImageRef(ctx context.Context, volume *provid
 
 // syncImageSpec updates the image spec to match the volume's desired state for
 // the fields that can change after creation. It returns true if the image was updated.
-func (r *VolumeReconciler) syncImageSpec(ctx context.Context, volume *providerapi.Volume, img *providerapi.Image) (bool, error) {
+func (r *VolumeReconciler) syncImageSpec(ctx context.Context, volume *api.Volume, img *api.Image) (bool, error) {
 	changed := false
 	if img.Spec.Size != volume.Spec.Size {
 		img.Spec.Size = volume.Spec.Size
@@ -385,20 +385,20 @@ func (r *VolumeReconciler) syncImageSpec(ctx context.Context, volume *providerap
 	return true, nil
 }
 
-func volumeImageID(volume *providerapi.Volume) string {
-	return providerapi.VolumeImageIDPrefix + volume.ID
+func volumeImageID(volume *api.Volume) string {
+	return api.VolumeImageIDPrefix + volume.ID
 }
 
-func buildVolumeImage(volume *providerapi.Volume, snapshotSource *string) *providerapi.Image {
-	return &providerapi.Image{
+func buildVolumeImage(volume *api.Volume, snapshotSource *string) *api.Image {
+	return &api.Image{
 		Metadata: apiutils.Metadata{
 			ID: volumeImageID(volume),
 		},
-		Spec: providerapi.ImageSpec{
+		Spec: api.ImageSpec{
 			Size:   volume.Spec.Size,
 			Limits: volume.Spec.Limits,
-			Encryption: providerapi.EncryptionSpec{
-				Type:                providerapi.EncryptionType(volume.Spec.VolumeEncryption.Type),
+			Encryption: api.EncryptionSpec{
+				Type:                api.EncryptionType(volume.Spec.VolumeEncryption.Type),
 				EncryptedPassphrase: volume.Spec.VolumeEncryption.EncryptedPassphrase,
 			},
 			SnapshotSource: snapshotSource,
@@ -406,7 +406,7 @@ func buildVolumeImage(volume *providerapi.Volume, snapshotSource *string) *provi
 	}
 }
 
-func (r *VolumeReconciler) reconcileEmptyVolume(ctx context.Context, log logr.Logger, volume *providerapi.Volume) error {
+func (r *VolumeReconciler) reconcileEmptyVolume(ctx context.Context, log logr.Logger, volume *api.Volume) error {
 	log.V(1).Info("Reconciling empty volume")
 
 	img := buildVolumeImage(volume, nil)
@@ -419,7 +419,7 @@ func (r *VolumeReconciler) reconcileEmptyVolume(ctx context.Context, log logr.Lo
 	return r.setVolumeImageRef(ctx, volume, createdImage.ID)
 }
 
-func (r *VolumeReconciler) reconcileOSVolume(ctx context.Context, log logr.Logger, volume *providerapi.Volume) error {
+func (r *VolumeReconciler) reconcileOSVolume(ctx context.Context, log logr.Logger, volume *api.Volume) error {
 	log.V(1).Info("Reconciling OS volume")
 
 	if volume.Spec.Source.OSImage == nil {
@@ -434,10 +434,10 @@ func (r *VolumeReconciler) reconcileOSVolume(ctx context.Context, log logr.Logge
 	}
 
 	switch osImage.Status.State {
-	case providerapi.OSImageStatePending:
+	case api.OSImageStatePending:
 		log.Info("OS image is pending, waiting", "osImageId", osImage.ID)
 		return nil
-	case providerapi.OSImageStateAvailable:
+	case api.OSImageStateAvailable:
 		log.V(1).Info("OS image is available", "osImageId", osImage.ID)
 	default:
 		return fmt.Errorf("OS image %s in unexpected state: %s", osImage.ID, osImage.Status.State)
@@ -458,7 +458,7 @@ func (r *VolumeReconciler) reconcileOSVolume(ctx context.Context, log logr.Logge
 	return r.setVolumeImageRef(ctx, volume, createdImage.ID)
 }
 
-func (r *VolumeReconciler) reconcileRestoredVolume(ctx context.Context, log logr.Logger, volume *providerapi.Volume) error {
+func (r *VolumeReconciler) reconcileRestoredVolume(ctx context.Context, log logr.Logger, volume *api.Volume) error {
 	log.V(1).Info("Reconciling volume restored from snapshot")
 
 	if volume.Spec.Source.Snapshot == nil {
@@ -472,12 +472,12 @@ func (r *VolumeReconciler) reconcileRestoredVolume(ctx context.Context, log logr
 	}
 
 	switch snapshot.Status.State {
-	case providerapi.SnapshotStatePending:
+	case api.SnapshotStatePending:
 		log.Info("Snapshot is pending, waiting", "snapshotId", snapshotID)
 		return nil
-	case providerapi.SnapshotStateReady:
+	case api.SnapshotStateReady:
 		log.V(1).Info("Snapshot is ready", "snapshotId", snapshotID)
-	case providerapi.SnapshotStateFailed:
+	case api.SnapshotStateFailed:
 		return fmt.Errorf("snapshot %s failed", snapshotID)
 	default:
 		return fmt.Errorf("snapshot %s in unexpected state: %s", snapshotID, snapshot.Status.State)
@@ -497,7 +497,7 @@ func (r *VolumeReconciler) reconcileRestoredVolume(ctx context.Context, log logr
 	return r.setVolumeImageRef(ctx, volume, createdImage.ID)
 }
 
-func (r *VolumeReconciler) deleteVolume(ctx context.Context, log logr.Logger, volume *providerapi.Volume) error {
+func (r *VolumeReconciler) deleteVolume(ctx context.Context, log logr.Logger, volume *api.Volume) error {
 	if !slices.Contains(volume.Finalizers, VolumeFinalizer) {
 		log.V(1).Info("volume has no finalizer: done")
 		return nil
@@ -528,7 +528,7 @@ func (r *VolumeReconciler) deleteVolume(ctx context.Context, log logr.Logger, vo
 	return nil
 }
 
-func volumeAccessEqual(a, b *providerapi.VolumeAccess) bool {
+func volumeAccessEqual(a, b *api.VolumeAccess) bool {
 	if a == nil && b == nil {
 		return true
 	}

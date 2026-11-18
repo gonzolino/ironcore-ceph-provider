@@ -34,24 +34,24 @@ var _ = Describe("Delete Volume", func() {
 		})
 		Expect(err).NotTo(HaveOccurred())
 
-		By("ensure the correct image has been created inside the ceph cluster")
-		image := &api.Image{}
-		Eventually(func() *api.Image {
-			oMap, err := ioctx.GetOmapValues(omap.LegacyNameVolumes, "", createResp.Volume.Metadata.Id, 10)
+		By("ensure the correct volume has been created inside the ceph cluster")
+		volume := &api.Volume{}
+		Eventually(func() *api.Volume {
+			oMap, err := ioctx.GetOmapValues(omap.NameVolumes, "", createResp.Volume.Metadata.Id, 10)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(oMap).To(HaveKey(createResp.Volume.Metadata.Id))
-			Expect(json.Unmarshal(oMap[createResp.Volume.Metadata.Id], image)).NotTo(HaveOccurred())
-			return image
+			Expect(json.Unmarshal(oMap[createResp.Volume.Metadata.Id], volume)).NotTo(HaveOccurred())
+			return volume
 		}).Should(SatisfyAll(
 			HaveField("Metadata.ID", Equal(createResp.Volume.Metadata.Id)),
-			HaveField("Status.State", Equal(api.ImageStateAvailable)),
+			HaveField("Status.State", Equal(api.VolumeStateAvailable)),
 			HaveField("Status.Access", SatisfyAll(
 				HaveField("Monitors", cephMonitors),
-				HaveField("Handle", fmt.Sprintf("%s/%s", cephPoolname, "img_"+createResp.Volume.Metadata.Id)),
+				HaveField("Handle", fmt.Sprintf("%s/%s%s", cephPoolname, api.VolumeImageIDPrefix, createResp.Volume.Metadata.Id)),
 				HaveField("User", strings.TrimPrefix(cephClientname, "client.")),
 				HaveField("UserKey", Not(BeEmpty())),
 			)),
-			HaveField("Status.Encryption", api.EncryptionState("")),
+			HaveField("Status.VolumeEncryption", Equal(api.VolumeEncryptionState(""))),
 		))
 
 		By("deleting a volume")
@@ -75,7 +75,7 @@ var _ = Describe("Delete Volume", func() {
 
 		By("ensuring the image has been deleted inside the ceph cluster")
 		Eventually(func() {
-			oMap, err := ioctx.GetOmapValues(omap.LegacyNameVolumes, "", createResp.Volume.Metadata.Id, 10)
+			oMap, err := ioctx.GetOmapValues(omap.NameVolumes, "", createResp.Volume.Metadata.Id, 10)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(oMap).NotTo(HaveKey(createResp.Volume.Metadata.Id))
 		})

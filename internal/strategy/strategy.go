@@ -8,17 +8,16 @@ import (
 	"fmt"
 
 	"github.com/ironcore-dev/ceph-provider/api"
-	apiv2 "github.com/ironcore-dev/ceph-provider/api/v2"
 	"github.com/ironcore-dev/controller-utils/metautils"
 	"github.com/ironcore-dev/ironcore/iri/common/idgen"
 )
 
-var SnapshotStrategy = snapshotStrategy{}
+var VolumeStrategy = volumeStrategy{}
 
-type snapshotStrategy struct{}
+type volumeStrategy struct{}
 
-func (snapshotStrategy) PrepareForCreate(obj *api.Snapshot) {
-	obj.Status = api.SnapshotStatus{State: api.SnapshotStatePending}
+func (volumeStrategy) PrepareForCreate(obj *api.Volume) {
+	obj.Status = api.VolumeStatus{State: api.VolumeStatePending}
 }
 
 var ImageStrategy = imageStrategy{
@@ -34,46 +33,25 @@ func (i imageStrategy) PrepareForCreate(obj *api.Image) {
 	obj.Status = api.ImageStatus{State: api.ImageStatePending}
 }
 
-var VolumeStrategy = volumeStrategy{}
+var SnapshotStrategy = snapshotStrategy{}
 
-type volumeStrategy struct{}
+type snapshotStrategy struct{}
 
-func (volumeStrategy) PrepareForCreate(obj *apiv2.Volume) {
-	obj.Status = apiv2.VolumeStatus{State: apiv2.VolumeStatePending}
-}
-
-var ImageV2Strategy = imageV2Strategy{
-	WWNGen: idgen.NewIDGen(rand.Reader, 16),
-}
-
-type imageV2Strategy struct {
-	WWNGen idgen.IDGen
-}
-
-func (i imageV2Strategy) PrepareForCreate(obj *apiv2.Image) {
-	obj.Spec.WWN = i.WWNGen.Generate()
-	obj.Status = apiv2.ImageStatus{State: apiv2.ImageStatePending}
-}
-
-var SnapshotV2Strategy = snapshotV2Strategy{}
-
-type snapshotV2Strategy struct{}
-
-func (snapshotV2Strategy) PrepareForCreate(obj *apiv2.Snapshot) {
-	obj.Status = apiv2.SnapshotStatus{State: apiv2.SnapshotStatePending}
+func (snapshotStrategy) PrepareForCreate(obj *api.Snapshot) {
+	obj.Status = api.SnapshotStatus{State: api.SnapshotStatePending}
 }
 
 var OSImageStrategy = osImageStrategy{}
 
 type osImageStrategy struct{}
 
-func (osImageStrategy) PrepareForCreate(obj *apiv2.OSImage) {
-	obj.Status = apiv2.OSImageStatus{State: apiv2.OSImageStatePending}
+func (osImageStrategy) PrepareForCreate(obj *api.OSImage) {
+	obj.Status = api.OSImageStatus{State: api.OSImageStatePending}
 
 	// Preconfigure the OSImage with labels for base image and snapshot references.
 	// This allows for efficient filtering and retrieval of OSImage objects based on their associated base image and snapshot.
 	metautils.SetLabels(obj, map[string]string{
-		apiv2.OSImageBaseImageLabel: fmt.Sprintf("base-%s", obj.ID),
-		apiv2.OSImageSnapshotLabel:  fmt.Sprintf("snap-%s", obj.ID[:7]),
+		api.OSImageBaseImageLabel: fmt.Sprintf("base-%s", obj.ID),
+		api.OSImageSnapshotLabel:  fmt.Sprintf("snap-%s", obj.ID[:7]),
 	})
 }

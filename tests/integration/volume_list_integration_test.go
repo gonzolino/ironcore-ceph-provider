@@ -35,24 +35,24 @@ var _ = Describe("List Volume", func() {
 		})
 		Expect(err).NotTo(HaveOccurred())
 
-		By("ensuring the correct image has been created inside the ceph cluster")
-		image := &api.Image{}
-		Eventually(func() *api.Image {
-			oMap, err := ioctx.GetOmapValues(omap.LegacyNameVolumes, "", createResp.Volume.Metadata.Id, 10)
+		By("ensuring the correct volume has been created inside the ceph cluster")
+		volume := &api.Volume{}
+		Eventually(func() *api.Volume {
+			oMap, err := ioctx.GetOmapValues(omap.NameVolumes, "", createResp.Volume.Metadata.Id, 10)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(oMap).To(HaveKey(createResp.Volume.Metadata.Id))
-			Expect(json.Unmarshal(oMap[createResp.Volume.Metadata.Id], image)).NotTo(HaveOccurred())
-			return image
+			Expect(json.Unmarshal(oMap[createResp.Volume.Metadata.Id], volume)).NotTo(HaveOccurred())
+			return volume
 		}).Should(SatisfyAll(
 			HaveField("Metadata.ID", Equal(createResp.Volume.Metadata.Id)),
-			HaveField("Status.State", Equal(api.ImageStateAvailable)),
+			HaveField("Status.State", Equal(api.VolumeStateAvailable)),
 			HaveField("Status.Access", SatisfyAll(
 				HaveField("Monitors", cephMonitors),
-				HaveField("Handle", fmt.Sprintf("%s/%s", cephPoolname, "img_"+createResp.Volume.Metadata.Id)),
+				HaveField("Handle", fmt.Sprintf("%s/%s%s", cephPoolname, api.VolumeImageIDPrefix, createResp.Volume.Metadata.Id)),
 				HaveField("User", strings.TrimPrefix(cephClientname, "client.")),
 				HaveField("UserKey", Not(BeEmpty())),
 			)),
-			HaveField("Status.Encryption", api.EncryptionState("")),
+			HaveField("Status.VolumeEncryption", Equal(api.VolumeEncryptionState(""))),
 		))
 
 		DeferCleanup(volumeClient.DeleteVolume, &iriv1alpha1.DeleteVolumeRequest{
@@ -73,14 +73,14 @@ var _ = Describe("List Volume", func() {
 			HaveField("State", Equal(iriv1alpha1.VolumeState_VOLUME_AVAILABLE)),
 			HaveField("Access", SatisfyAll(
 				HaveField("Driver", "ceph"),
-				HaveField("Handle", image.Spec.WWN),
+				HaveField("Handle", volume.Status.Access.WWN),
 				HaveField("Attributes", SatisfyAll(
-					HaveKeyWithValue("monitors", image.Status.Access.Monitors),
-					HaveKeyWithValue("image", image.Status.Access.Handle),
+					HaveKeyWithValue("monitors", volume.Status.Access.Monitors),
+					HaveKeyWithValue("image", volume.Status.Access.Handle),
 				)),
 				HaveField("SecretData", SatisfyAll(
-					HaveKeyWithValue("userID", []byte(image.Status.Access.User)),
-					HaveKeyWithValue("userKey", []byte(image.Status.Access.UserKey)),
+					HaveKeyWithValue("userID", []byte(volume.Status.Access.User)),
+					HaveKeyWithValue("userKey", []byte(volume.Status.Access.UserKey)),
 				)),
 			)),
 		))
@@ -99,14 +99,14 @@ var _ = Describe("List Volume", func() {
 			HaveField("State", Equal(iriv1alpha1.VolumeState_VOLUME_AVAILABLE)),
 			HaveField("Access", SatisfyAll(
 				HaveField("Driver", "ceph"),
-				HaveField("Handle", image.Spec.WWN),
+				HaveField("Handle", volume.Status.Access.WWN),
 				HaveField("Attributes", SatisfyAll(
-					HaveKeyWithValue("monitors", image.Status.Access.Monitors),
-					HaveKeyWithValue("image", image.Status.Access.Handle),
+					HaveKeyWithValue("monitors", volume.Status.Access.Monitors),
+					HaveKeyWithValue("image", volume.Status.Access.Handle),
 				)),
 				HaveField("SecretData", SatisfyAll(
-					HaveKeyWithValue("userID", []byte(image.Status.Access.User)),
-					HaveKeyWithValue("userKey", []byte(image.Status.Access.UserKey)),
+					HaveKeyWithValue("userID", []byte(volume.Status.Access.User)),
+					HaveKeyWithValue("userKey", []byte(volume.Status.Access.UserKey)),
 				)),
 			)),
 		))

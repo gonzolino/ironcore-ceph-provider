@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: SAP SE or an SAP affiliate company and IronCore contributors
+// SPDX-FileCopyrightText: 2024 SAP SE or an SAP affiliate company and IronCore contributors
 // SPDX-License-Identifier: Apache-2.0
 
 package volumeserver
@@ -8,29 +8,26 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/go-logr/logr"
-	"github.com/ironcore-dev/ceph-provider/api"
+	api2 "github.com/ironcore-dev/ceph-provider/api"
 	"github.com/ironcore-dev/ceph-provider/internal/utils"
 	iri "github.com/ironcore-dev/ironcore/iri/apis/volume/v1alpha1"
-	"github.com/ironcore-dev/provider-utils/storeutils/store"
 	"k8s.io/apimachinery/pkg/labels"
 )
 
-func (s *Server) getIriVolumeSnapshot(ctx context.Context, log logr.Logger, snapshotId string) (*iri.VolumeSnapshot, error) {
-	log.V(2).Info("Get volume snapshot", "snapshotId", snapshotId)
-	cephSnapshot, err := s.snapshotStore.Get(ctx, snapshotId)
+func (s *Server) getIriVolumeSnapshot(ctx context.Context, snapshotId string) (*iri.VolumeSnapshot, error) {
+	snapshot, err := s.snapshotStore.Get(ctx, snapshotId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get snapshot %s: %w", snapshotId, err)
 	}
 
-	if !api.IsObjectManagedBy(cephSnapshot, api.VolumeManager) {
+	if !api2.IsObjectManagedBy(snapshot, api2.VolumeManager) {
 		return nil, fmt.Errorf("failed to get snapshot %s: %w", snapshotId, utils.ErrSnapshotIsntManaged)
 	}
 
-	return s.convertSnapshotToIriVolumeSnapshot(cephSnapshot)
+	return s.convertSnapshotToIRI(ctx, snapshot)
 }
 
-func (s *Server) filterSnapshot(snapshots []*iri.VolumeSnapshot, filter *iri.VolumeSnapshotFilter) []*iri.VolumeSnapshot {
+func (s *Server) filterSnapshots(snapshots []*iri.VolumeSnapshot, filter *iri.VolumeSnapshotFilter) []*iri.VolumeSnapshot {
 	if filter == nil {
 		return snapshots
 	}
@@ -50,14 +47,18 @@ func (s *Server) filterSnapshot(snapshots []*iri.VolumeSnapshot, filter *iri.Vol
 }
 
 func (s *Server) listSnapshots(ctx context.Context) ([]*iri.VolumeSnapshot, error) {
-	cephSnapshots, err := s.snapshotStore.List(ctx, store.MatchingLabels{api.ManagerLabel: api.VolumeManager})
+	snapshots, err := s.snapshotStore.List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("error listing snapshots: %w", err)
 	}
 
 	var res []*iri.VolumeSnapshot
-	for _, cephSnapshot := range cephSnapshots {
-		iriSnapshot, err := s.convertSnapshotToIriVolumeSnapshot(cephSnapshot)
+	for _, snapshot := range snapshots {
+		if !api2.IsObjectManagedBy(snapshot, api2.VolumeManager) {
+			continue
+		}
+
+		iriSnapshot, err := s.convertSnapshotToIRI(ctx, snapshot)
 		if err != nil {
 			return nil, err
 		}
@@ -68,11 +69,8 @@ func (s *Server) listSnapshots(ctx context.Context) ([]*iri.VolumeSnapshot, erro
 }
 
 func (s *Server) ListVolumeSnapshots(ctx context.Context, req *iri.ListVolumeSnapshotsRequest) (*iri.ListVolumeSnapshotsResponse, error) {
-	log := s.loggerFrom(ctx)
-	log.V(2).Info("Listing volume snapshots")
-
 	if filter := req.Filter; filter != nil && filter.Id != "" {
-		volumeSnapshot, err := s.getIriVolumeSnapshot(ctx, log, filter.Id)
+		volumeSnapshot, err := s.getIriVolumeSnapshot(ctx, filter.Id)
 		if err != nil {
 			if !errors.Is(err, utils.ErrSnapshotNotFound) && !errors.Is(err, utils.ErrSnapshotIsntManaged) {
 				return nil, utils.ConvertInternalErrorToGRPC(err)
@@ -92,9 +90,8 @@ func (s *Server) ListVolumeSnapshots(ctx context.Context, req *iri.ListVolumeSna
 		return nil, utils.ConvertInternalErrorToGRPC(err)
 	}
 
-	snapshots = s.filterSnapshot(snapshots, req.Filter)
+	snapshots = s.filterSnapshots(snapshots, req.Filter)
 
-	log.V(2).Info("Returning volume snapshot list")
 	return &iri.ListVolumeSnapshotsResponse{
 		VolumeSnapshots: snapshots,
 	}, nil
