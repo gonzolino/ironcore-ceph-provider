@@ -5,10 +5,8 @@ package strategy
 
 import (
 	"crypto/rand"
-	"fmt"
 
 	"github.com/ironcore-dev/ceph-provider/api"
-	"github.com/ironcore-dev/controller-utils/metautils"
 	"github.com/ironcore-dev/ironcore/iri/common/idgen"
 )
 
@@ -17,7 +15,13 @@ var VolumeStrategy = volumeStrategy{}
 type volumeStrategy struct{}
 
 func (volumeStrategy) PrepareForCreate(obj *api.Volume) {
-	obj.Status = api.VolumeStatus{State: api.VolumeStatePending}
+	if obj.Status.State == "" {
+		obj.Status = api.VolumeStatus{State: api.VolumeStatePending}
+	}
+
+	if obj.Spec.ImageName == "" {
+		obj.Spec.ImageName = api.VolumeImageIDPrefix + obj.ID
+	}
 }
 
 var ImageStrategy = imageStrategy{
@@ -29,8 +33,13 @@ type imageStrategy struct {
 }
 
 func (i imageStrategy) PrepareForCreate(obj *api.Image) {
-	obj.Spec.WWN = i.WWNGen.Generate()
-	obj.Status = api.ImageStatus{State: api.ImageStatePending}
+	if obj.Status.State == "" {
+		obj.Status = api.ImageStatus{State: api.ImageStatePending}
+	}
+
+	if obj.Spec.WWN == "" {
+		obj.Spec.WWN = i.WWNGen.Generate()
+	}
 }
 
 var SnapshotStrategy = snapshotStrategy{}
@@ -38,7 +47,9 @@ var SnapshotStrategy = snapshotStrategy{}
 type snapshotStrategy struct{}
 
 func (snapshotStrategy) PrepareForCreate(obj *api.Snapshot) {
-	obj.Status = api.SnapshotStatus{State: api.SnapshotStatePending}
+	if obj.Status.State == "" {
+		obj.Status = api.SnapshotStatus{State: api.SnapshotStatePending}
+	}
 }
 
 var OSImageStrategy = osImageStrategy{}
@@ -46,12 +57,14 @@ var OSImageStrategy = osImageStrategy{}
 type osImageStrategy struct{}
 
 func (osImageStrategy) PrepareForCreate(obj *api.OSImage) {
-	obj.Status = api.OSImageStatus{State: api.OSImageStatePending}
+	if obj.Status.State == "" {
+		obj.Status = api.OSImageStatus{State: api.OSImageStatePending}
+	}
 
-	// Preconfigure the OSImage with labels for base image and snapshot references.
-	// This allows for efficient filtering and retrieval of OSImage objects based on their associated base image and snapshot.
-	metautils.SetLabels(obj, map[string]string{
-		api.OSImageBaseImageLabel: fmt.Sprintf("base-%s", obj.ID),
-		api.OSImageSnapshotLabel:  fmt.Sprintf("snap-%s", obj.ID[:7]),
-	})
+	if obj.Spec.BaseImageName == "" {
+		obj.Spec.BaseImageName = api.OSImageBaseImagePrefix + obj.ID
+	}
+	if obj.Spec.SnapshotName == "" {
+		obj.Spec.SnapshotName = api.OSImageSnapshotPrefix + obj.ID[:7]
+	}
 }

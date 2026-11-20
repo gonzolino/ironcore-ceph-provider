@@ -180,7 +180,7 @@ func (r *VolumeReconciler) Start(ctx context.Context) error {
 }
 
 func (r *VolumeReconciler) requeueVolumesForImage(ctx context.Context, imageID string) {
-	volumes, err := r.volumeStore.List(ctx, store.MatchingFields{api.VolumeStatusImageRefField: imageID})
+	volumes, err := r.volumeStore.List(ctx, store.MatchingFields{api.VolumeSpecImageNameField: imageID})
 	if err != nil {
 		r.log.Error(err, "failed to list volumes for image event requeue")
 		return
@@ -262,7 +262,7 @@ func (r *VolumeReconciler) reconcileVolume(ctx context.Context, id string) error
 		return nil
 	}
 
-	imageID := volumeImageID(volume)
+	imageID := volume.Spec.ImageName
 	img, err := r.imageStore.Get(ctx, imageID)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
@@ -385,14 +385,10 @@ func (r *VolumeReconciler) syncImageSpec(ctx context.Context, volume *api.Volume
 	return true, nil
 }
 
-func volumeImageID(volume *api.Volume) string {
-	return api.VolumeImageIDPrefix + volume.ID
-}
-
 func buildVolumeImage(volume *api.Volume, snapshotSource *string) *api.Image {
 	return &api.Image{
 		Metadata: apiutils.Metadata{
-			ID: volumeImageID(volume),
+			ID: volume.Spec.ImageName,
 		},
 		Spec: api.ImageSpec{
 			Size:   volume.Spec.Size,

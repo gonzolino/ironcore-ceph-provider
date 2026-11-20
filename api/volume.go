@@ -8,13 +8,13 @@ import (
 )
 
 const (
-	VolumeStatusImageRefField           = "status.imageRef"
+	VolumeSpecImageNameField            = "spec.imageName"
 	VolumeSpecSourceOSImageField        = "spec.source.osImage"
 	VolumeSpecSourceSnapshotSourceField = "spec.source.snapshotSource"
 )
 
-func SetupVolumeStatusImageRefFieldIndexer(volume *Volume) string {
-	return volume.Status.ImageRef
+func SetupVolumeSpecImageNameFieldIndexer(volume *Volume) string {
+	return volume.Spec.ImageName
 }
 
 func SetupVolumeSpecSourceOSImageFieldIndexer(volume *Volume) string {
@@ -32,7 +32,7 @@ func SetupVolumeSpecSourceSnapshotFieldIndexer(volume *Volume) string {
 }
 
 type Volume struct {
-	apiutils.Metadata `json:"metadata,omitempty"`
+	apiutils.Metadata `json:"metadata"`
 
 	Spec   VolumeSpec   `json:"spec"`
 	Status VolumeStatus `json:"status"`
@@ -52,8 +52,8 @@ const (
 )
 
 type VolumeSpec struct {
-	Size uint64 `json:"size"`
-	//WWN              string               `json:"wwn"`
+	ImageName        string               `json:"imageName"`
+	Size             uint64               `json:"size"`
 	Limits           Limits               `json:"limits"`
 	VolumeEncryption VolumeEncryptionSpec `json:"encryption"`
 

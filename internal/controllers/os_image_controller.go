@@ -191,7 +191,7 @@ func (r *OSImageReconciler) Start(ctx context.Context) error {
 }
 
 func (r *OSImageReconciler) requeueOSImagesForImage(ctx context.Context, imageID string) {
-	osImages, err := r.osImageStore.List(ctx, store.MatchingLabels{api.OSImageBaseImageLabel: imageID})
+	osImages, err := r.osImageStore.List(ctx, store.MatchingFields{api.OSImageSpecBaseImageNameField: imageID})
 	if err != nil {
 		r.log.Error(err, "failed to list OS images for base image event requeue")
 		return
@@ -202,7 +202,7 @@ func (r *OSImageReconciler) requeueOSImagesForImage(ctx context.Context, imageID
 }
 
 func (r *OSImageReconciler) requeueOSImagesForSnapshot(ctx context.Context, snapshotID string) {
-	osImages, err := r.osImageStore.List(ctx, store.MatchingLabels{api.OSImageSnapshotLabel: snapshotID})
+	osImages, err := r.osImageStore.List(ctx, store.MatchingFields{api.OSImageSpecSnapshotNameField: snapshotID})
 	if err != nil {
 		r.log.Error(err, "failed to list OS images for snapshot event requeue")
 		return
@@ -263,14 +263,16 @@ func (r *OSImageReconciler) reconcileOSImage(ctx context.Context, id string) err
 	}
 
 	// Determine IDs for the base image and snapshot associated with this OS image.
-	var baseImageID, snapshotID string
-	var ok bool
-	if baseImageID, ok = osImage.Labels[api.OSImageBaseImageLabel]; !ok {
-		return fmt.Errorf("OS image %s missing base image label", osImage.ID)
-	}
-	if snapshotID, ok = osImage.Labels[api.OSImageSnapshotLabel]; !ok {
-		return fmt.Errorf("OS image %s missing snapshot label", osImage.ID)
-	}
+	//var baseImageID, snapshotID string
+	//var ok bool
+	baseImageID := osImage.Spec.BaseImageName
+	snapshotID := osImage.Spec.SnapshotName
+	//if baseImageID, ok = osImage.Labels[api.OSImageBaseImageLabel]; !ok {
+	//	return fmt.Errorf("OS image %s missing base image label", osImage.ID)
+	//}
+	//if snapshotID, ok = osImage.Labels[api.OSImageSnapshotLabel]; !ok {
+	//	return fmt.Errorf("OS image %s missing snapshot label", osImage.ID)
+	//}
 
 	// Step 1: Resolve OCI image to get digest
 	imageRef := osImage.Spec.Source.Reference

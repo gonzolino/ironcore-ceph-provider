@@ -17,4 +17,8 @@ const (
 const (
 	// VolumeImageIDPrefix is the prefix used for the image ID created for a volume.
 	VolumeImageIDPrefix = "vol-"
+	// OSImageBaseImagePrefix is the prefix used for the base image name created for an OS image.
+	OSImageBaseImagePrefix = "base-"
+	// OSImageSnapshotPrefix is the prefix used for the snapshot name created for an OS image.
+	OSImageSnapshotPrefix = "snap-"
 )

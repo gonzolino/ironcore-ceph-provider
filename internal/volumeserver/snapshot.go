@@ -24,7 +24,7 @@ func (s *Server) convertSnapshotToIRI(ctx context.Context, snapshot *api2.Snapsh
 	}
 
 	imageRef := snapshot.Spec.ImageRef
-	volumes, err := s.volumeStore.List(ctx, store.MatchingFields{api2.VolumeStatusImageRefField: imageRef})
+	volumes, err := s.volumeStore.List(ctx, store.MatchingFields{api2.VolumeSpecImageNameField: imageRef})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list volumes with imageRef %s: %w", imageRef, err)
 	}

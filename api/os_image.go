@@ -8,10 +8,18 @@ import (
 )
 
 const (
-	OSImageAnnotation     = "os-image-id"
-	OSImageBaseImageLabel = "base-image-id"
-	OSImageSnapshotLabel  = "snapshot-id"
+	OSImageAnnotation             = "os-image-id"
+	OSImageSpecBaseImageNameField = "spec.baseImageName"
+	OSImageSpecSnapshotNameField  = "spec.snapshotName"
 )
+
+func SetupOSImageSpecBaseImageNameFieldIndexer(osImage *OSImage) string {
+	return osImage.Spec.BaseImageName
+}
+
+func SetupOSImageSpecSnapshotNameFieldIndexer(osImage *OSImage) string {
+	return osImage.Spec.SnapshotName
+}
 
 type OSImage struct {
 	apiutils.Metadata `json:"metadata"`
@@ -28,7 +36,9 @@ const (
 )
 
 type OSImageSpec struct {
-	Source OSImageSource `json:"source"`
+	BaseImageName string        `json:"baseImageName"`
+	SnapshotName  string        `json:"snapshotName"`
+	Source        OSImageSource `json:"source"`
 }
 
 type OSImageSource struct {

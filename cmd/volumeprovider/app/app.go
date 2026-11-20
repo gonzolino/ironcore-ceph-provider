@@ -246,7 +246,7 @@ func Run(ctx context.Context, opts Options) error {
 		CreateStrategy: strategy.VolumeStrategy,
 		IteratorSize:   opts.Ceph.OmapIteratorSize,
 		FieldIndexers: map[string]store.IndexerFunc[*api.Volume]{
-			api.VolumeStatusImageRefField:           api.SetupVolumeStatusImageRefFieldIndexer,
+			api.VolumeSpecImageNameField:            api.SetupVolumeSpecImageNameFieldIndexer,
 			api.VolumeSpecSourceOSImageField:        api.SetupVolumeSpecSourceOSImageFieldIndexer,
 			api.VolumeSpecSourceSnapshotSourceField: api.SetupVolumeSpecSourceSnapshotFieldIndexer,
 		},
@@ -314,6 +314,10 @@ func Run(ctx context.Context, opts Options) error {
 		NewFunc:        func() *api.OSImage { return &api.OSImage{} },
 		CreateStrategy: strategy.OSImageStrategy,
 		IteratorSize:   opts.Ceph.OmapIteratorSize,
+		FieldIndexers: map[string]store.IndexerFunc[*api.OSImage]{
+			api.OSImageSpecBaseImageNameField: api.SetupOSImageSpecBaseImageNameFieldIndexer,
+			api.OSImageSpecSnapshotNameField:  api.SetupOSImageSpecSnapshotNameFieldIndexer,
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("failed to initialize os image store: %w", err)
