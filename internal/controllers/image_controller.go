@@ -241,7 +241,8 @@ func (r *ImageReconciler) reconcileImage(ctx context.Context, id string) error {
 	}
 	defer ioCtx.Destroy()
 
-	rbdImage, err := librbd.OpenImage(ioCtx, image.ID, librbd.NoSnapshot)
+	rbdImageName := api.RBDImageName(image)
+	rbdImage, err := librbd.OpenImage(ioCtx, rbdImageName, librbd.NoSnapshot)
 	if err != nil {
 		if !errors.Is(err, librbd.ErrNotFound) {
 			return fmt.Errorf("failed to open RBD image: %w", err)
@@ -253,7 +254,7 @@ func (r *ImageReconciler) reconcileImage(ctx context.Context, id string) error {
 			// Image creation is not yet complete
 			return nil
 		}
-		rbdImage, err = librbd.OpenImage(ioCtx, image.ID, librbd.NoSnapshot)
+		rbdImage, err = librbd.OpenImage(ioCtx, rbdImageName, librbd.NoSnapshot)
 		if err != nil {
 			return fmt.Errorf("failed to open RBD image after creation: %w", err)
 		}
@@ -408,8 +409,9 @@ func (r *ImageReconciler) createImage(ctx context.Context, ioCtx *rados.IOContex
 	}
 
 	// Create empty image if no snapshot source is given
+	rbdImageName := api.RBDImageName(image)
 	if image.Spec.SnapshotSource == nil {
-		if err := librbd.CreateImage(ioCtx, image.ID, round.OffBytes(image.Spec.Size), options); err != nil {
+		if err := librbd.CreateImage(ioCtx, rbdImageName, round.OffBytes(image.Spec.Size), options); err != nil {
 			if !errors.Is(err, librbd.ErrExist) {
 				return false, fmt.Errorf("failed to create RBD image: %w", err)
 			}
@@ -459,7 +461,9 @@ func (r *ImageReconciler) createImage(ctx context.Context, ioCtx *rados.IOContex
 		log.V(1).Info("Added finalizer to source snapshot", "snapshotId", snapshot.ID)
 	}
 
-	if err := librbd.CloneImage(ioCtx, parentImage.ID, snapshot.ID, ioCtx, image.ID, options); err != nil {
+	rbdParentImageName := api.RBDImageName(parentImage)
+	rbdSnapshotName := api.RBDSnapshotName(snapshot)
+	if err := librbd.CloneImage(ioCtx, rbdParentImageName, rbdSnapshotName, ioCtx, rbdImageName, options); err != nil {
 		if !errors.Is(err, librbd.ErrExist) {
 			return false, fmt.Errorf("failed to clone RBD image: %w", err)
 		}
@@ -488,8 +492,9 @@ func (r *ImageReconciler) deleteImage(ctx context.Context, log logr.Logger, imag
 	}
 	defer ioCtx.Destroy()
 
-	if err := librbd.RemoveImage(ioCtx, image.ID); err != nil && !errors.Is(err, librbd.ErrNotFound) {
-		return fmt.Errorf("failed to remove RBD image %s: %w", image.ID, err)
+	rbdImageName := api.RBDImageName(image)
+	if err := librbd.RemoveImage(ioCtx, rbdImageName); err != nil && !errors.Is(err, librbd.ErrNotFound) {
+		return fmt.Errorf("failed to remove RBD image %s: %w", rbdImageName, err)
 	}
 	log.Info("RBD image removed")
 

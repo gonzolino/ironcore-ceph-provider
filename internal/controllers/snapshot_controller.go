@@ -227,7 +227,9 @@ func (r *SnapshotReconciler) reconcileSnapshot(ctx context.Context, id string) e
 	}
 	defer ioCtx.Destroy()
 
-	rbdParentImage, err := librbd.OpenImage(ioCtx, parentImage.ID, snapshot.ID)
+	rbdParentImageName := api.RBDImageName(parentImage)
+	rbdSnapshotName := api.RBDSnapshotName(snapshot)
+	rbdParentImage, err := librbd.OpenImage(ioCtx, rbdParentImageName, rbdSnapshotName)
 	if err != nil {
 		if !errors.Is(err, librbd.ErrNotFound) {
 			return fmt.Errorf("failed to open parent RBD image: %w", err)
@@ -238,14 +240,14 @@ func (r *SnapshotReconciler) reconcileSnapshot(ctx context.Context, id string) e
 		} else if !ok {
 			return nil
 		}
-		rbdParentImage, err = librbd.OpenImage(ioCtx, parentImage.ID, snapshot.ID)
+		rbdParentImage, err = librbd.OpenImage(ioCtx, rbdParentImageName, rbdSnapshotName)
 		if err != nil {
 			return fmt.Errorf("failed to open parent RBD image after snapshot creation: %w", err)
 		}
 	}
 	defer closeImage(log, rbdParentImage)
 
-	rbdSnapshot := rbdParentImage.GetSnapshot(snapshot.ID)
+	rbdSnapshot := rbdParentImage.GetSnapshot(rbdSnapshotName)
 	isProtected, err := rbdSnapshot.IsProtected()
 	if err != nil {
 		return fmt.Errorf("failed to check RBD snapshot protection: %w", err)
@@ -264,7 +266,7 @@ func (r *SnapshotReconciler) reconcileSnapshot(ctx context.Context, id string) e
 	}
 
 	// Set the newly created snapshot as source of readable data for the image handle (relevant for size and digest)
-	if err := rbdParentImage.SetSnapshot(snapshot.ID); err != nil {
+	if err := rbdParentImage.SetSnapshot(rbdSnapshotName); err != nil {
 		return fmt.Errorf("failed to set RBD snapshot %s: %w", snapshot.ID, err)
 	}
 	snapSize, err := rbdParentImage.GetSize()
@@ -290,13 +292,15 @@ func (r *SnapshotReconciler) reconcileSnapshot(ctx context.Context, id string) e
 }
 
 func (r *SnapshotReconciler) createSnapshot(ctx context.Context, ioCtx *rados.IOContext, log logr.Logger, parentImage *api.Image, snapshot *api.Snapshot) (bool, error) {
-	rbdParentImage, err := librbd.OpenImage(ioCtx, parentImage.ID, librbd.NoSnapshot)
+	rbdParentImageName := api.RBDImageName(parentImage)
+	rbdParentImage, err := librbd.OpenImage(ioCtx, rbdParentImageName, librbd.NoSnapshot)
 	if err != nil {
 		return false, fmt.Errorf("failed to open parent RBD image: %w", err)
 	}
 	defer closeImage(log, rbdParentImage)
 
-	if _, err := rbdParentImage.CreateSnapshot(snapshot.ID); err != nil {
+	rbdSnapshotName := api.RBDSnapshotName(snapshot)
+	if _, err := rbdParentImage.CreateSnapshot(rbdSnapshotName); err != nil {
 		if !errors.Is(err, librbd.ErrExist) {
 			// If there is an RBD error during the snapshot creation, do not throw an error and keep reconciling the snapshot until creation succeeds.
 			// Instead, log the error, mark the snapshot as failed and stop the reconcile.
@@ -325,13 +329,19 @@ func (r *SnapshotReconciler) deleteSnapshot(ctx context.Context, log logr.Logger
 		return nil
 	}
 
+	parentImage, err := r.imageStore.Get(ctx, snapshot.Spec.ImageRef)
+	if err != nil {
+		return fmt.Errorf("failed to get parent image %s: %w", snapshot.Spec.ImageRef, err)
+	}
 	ioCtx, err := r.conn.OpenIOContext(r.pool)
 	if err != nil {
 		return fmt.Errorf("unable to get RADOS IOContext: %w", err)
 	}
 	defer ioCtx.Destroy()
 
-	rbdImage, err := librbd.OpenImage(ioCtx, snapshot.Spec.ImageRef, snapshot.ID)
+	rbdParentImageName := api.RBDImageName(parentImage)
+	rbdSnapshotName := api.RBDSnapshotName(snapshot)
+	rbdImage, err := librbd.OpenImage(ioCtx, rbdParentImageName, rbdSnapshotName)
 	if err != nil {
 		if !errors.Is(err, librbd.ErrNotFound) {
 			return fmt.Errorf("failed to open parent RBD image: %w", err)
@@ -340,7 +350,7 @@ func (r *SnapshotReconciler) deleteSnapshot(ctx context.Context, log logr.Logger
 	} else {
 		defer closeImage(log, rbdImage)
 
-		rbdSnapshot := rbdImage.GetSnapshot(snapshot.ID)
+		rbdSnapshot := rbdImage.GetSnapshot(rbdSnapshotName)
 
 		if protected, err := rbdSnapshot.IsProtected(); err != nil {
 			return fmt.Errorf("failed to check if RBD snapshot is protected: %w", err)
@@ -357,20 +367,12 @@ func (r *SnapshotReconciler) deleteSnapshot(ctx context.Context, log logr.Logger
 		log.Info("RBD snapshot removed")
 	}
 
-	parentImage, err := r.imageStore.Get(ctx, snapshot.Spec.ImageRef)
-	if err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("failed to get parent image %s: %w", snapshot.Spec.ImageRef, err)
-		}
-		log.V(1).Info("parent image already removed")
-	} else {
-		// Remove finalizer from parent image to signal this snapshot is no longer blocking deletion
-		parentImageFinalizer := fmt.Sprintf("%s/%s", snapshotFinalizer, snapshot.ID)
-		if _, removed, err := removeFinalizer(ctx, r.imageStore, parentImage, parentImageFinalizer); err != nil {
-			return fmt.Errorf("failed to remove finalizer from parent image: %w", err)
-		} else if removed {
-			log.V(1).Info("Removed finalizer from parent image", "parentImageId", parentImage.ID)
-		}
+	// Remove finalizer from parent image to signal this snapshot is no longer blocking deletion
+	parentImageFinalizer := fmt.Sprintf("%s/%s", snapshotFinalizer, snapshot.ID)
+	if _, removed, err := removeFinalizer(ctx, r.imageStore, parentImage, parentImageFinalizer); err != nil {
+		return fmt.Errorf("failed to remove finalizer from parent image: %w", err)
+	} else if removed {
+		log.V(1).Info("Removed finalizer from parent image", "parentImageId", parentImage.ID)
 	}
 
 	if _, removed, err := removeFinalizer(ctx, r.snapshotStore, snapshot, snapshotFinalizer); store.IgnoreErrNotFound(err) != nil {

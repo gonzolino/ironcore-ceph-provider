@@ -30,6 +30,7 @@ const (
 )
 
 type SnapshotSpec struct {
+	RBDName    *string            `json:"rbdName"`
 	ImageRef   string             `json:"imageRef"`
 	Protection SnapshotProtection `json:"protection"`
 }
@@ -45,4 +46,11 @@ const (
 type SnapshotStatus struct {
 	State SnapshotState `json:"state"`
 	Size  uint64        `json:"size"`
+}
+
+func RBDSnapshotName(snapshot *Snapshot) string {
+	if snapshot.Spec.RBDName != nil {
+		return *snapshot.Spec.RBDName
+	}
+	return snapshot.ID
 }

@@ -39,6 +39,7 @@ const (
 )
 
 type ImageSpec struct {
+	RBDName    *string        `json:"rbdName"`
 	Size       uint64         `json:"size"`
 	WWN        string         `json:"wwn"`
 	Limits     Limits         `json:"limits"`
@@ -98,3 +99,10 @@ const (
 )
 
 type LimitType string
+
+func RBDImageName(image *Image) string {
+	if image.Spec.RBDName != nil {
+		return *image.Spec.RBDName
+	}
+	return image.ID
+}
