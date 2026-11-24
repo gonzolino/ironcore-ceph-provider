@@ -9,7 +9,7 @@ require (
 	github.com/go-logr/logr v1.4.4
 	github.com/google/addlicense v1.2.0
 	github.com/ironcore-dev/brokers v0.0.0-20260928082849-628cc25fd8ca
-	github.com/ironcore-dev/controller-utils v0.14.1-0.20260904065051-9ddd709051f4
+	github.com/ironcore-dev/controller-utils v0.15.1
 	github.com/ironcore-dev/ironcore v0.8.1-0.20260924093634-7346f4f9b904
 	github.com/ironcore-dev/ironcore-image v0.5.1-0.20260701105042-7ab1ed925593
 	github.com/ironcore-dev/provider-utils v0.0.0-20261009075155-2798f2521268
@@ -151,7 +151,7 @@ require (
 	golang.org/x/mod v0.41.0 // indirect
 	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/term v0.47.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
@@ -177,6 +177,7 @@ require (
 
 replace (
 	github.com/googleapis/gnostic => github.com/googleapis/gnostic v0.4.1
+	github.com/ironcore-dev/ironcore => github.com/gonzolino/ironcore v0.0.0-20261124190700-206f2c28c998
 	github.com/kubernetes-incubator/external-storage => github.com/libopenstorage/external-storage v0.20.4-openstorage-rc3
 	github.com/portworx/sched-ops => github.com/portworx/sched-ops v0.20.4-openstorage-rc3
 )
