@@ -128,7 +128,11 @@ COPY --from=busybox /bin/sh /bin/sh
 COPY --from=busybox /bin/mkdir /bin/mkdir
 COPY --from=ceph-volume-provider-builder /usr/lib/librados.so.2 \
 /usr/lib/librbd.so.1 \
+/usr/lib/libceph-common.so.2 \
+/usr/lib/libboost_*.so* \
+/usr/lib/libthrift-0.16.0.so \
 /lib/${LIB_DIR_PREFIX}-linux-gnu/libc.so.6 \
+/lib/${LIB_DIR_PREFIX}-linux-gnu/libcap.so.2 \
 /lib/${LIB_DIR_PREFIX}-linux-gnu/libstdc++.so.6 \
 /lib/${LIB_DIR_PREFIX}-linux-gnu/libgcc_s.so.1 \
 /lib/${LIB_DIR_PREFIX}-linux-gnu/libssl.so.3 \
@@ -141,6 +145,7 @@ COPY --from=ceph-volume-provider-builder /usr/lib/librados.so.2 \
 /lib/${LIB_DIR_PREFIX}-linux-gnu/libibverbs.so.1 \
 /lib/${LIB_DIR_PREFIX}-linux-gnu/librdmacm.so.1 \
 /lib/${LIB_DIR_PREFIX}-linux-gnu/libz.so.1 \
+/lib/${LIB_DIR_PREFIX}-linux-gnu/libbz2.so.1.0 \
 /lib/${LIB_DIR_PREFIX}-linux-gnu/libcurl.so.4 \
 /lib/${LIB_DIR_PREFIX}-linux-gnu/libthrift-0.17.0.so \
 /lib/${LIB_DIR_PREFIX}-linux-gnu/libm.so.6 \
@@ -184,8 +189,6 @@ COPY --from=ceph-volume-provider-builder /usr/lib/librados.so.2 \
 RUN mkdir -p /${LIB_DIR}
 COPY --from=ceph-volume-provider-builder /${LIB_DIR}/ld-linux-${LIB_DIR_PREFIX_MINUS}.so.${LIB_DIR_SUFFIX_NUMBER} /${LIB_DIR}/
 RUN mkdir -p /usr/lib/ceph/
-COPY --from=ceph-volume-provider-builder /usr/lib/ceph/libceph-common.so.2 /usr/lib/ceph
-
 COPY --from=ceph-volume-provider-builder /workspace/bin/ceph-volume-provider /ceph-volume-provider
 
 # Build stage used for validation of the output-image
