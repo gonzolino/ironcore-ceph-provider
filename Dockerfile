@@ -43,7 +43,6 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH GO111MODULE=on go build -ldflags="${LDFLAGS}" -a -o bin/ceph-bucket-provider ./cmd/bucketprovider/main.go
 
-
 FROM ceph-dev AS ceph-volume-provider-builder
 WORKDIR /workspace
 COPY --from=builder /workspace ./
@@ -71,6 +70,12 @@ RUN if [ "$TARGETARCH" = "amd64" ] && [ "$BUILDARCH" = "arm64" ]; then \
 ENV CC=""
 ENV CGO_LDFLAGS=""
 
+COPY ./lib/librbd.so* ./lib/librados.so* ./lib/libceph-common.so.2 /usr/lib/
+COPY ./include/rbd/* /usr/include/rbd/
+COPY ./include/rados/* /usr/include/rados/
+
+COPY ./lib/libboost_*.so* ./lib/libthrift-0.16.0.so /usr/lib/
+
 # Build
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg \
@@ -86,7 +91,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     fi && \
     CGO_ENABLED=1 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     CC="$CC" CGO_LDFLAGS="$CGO_LDFLAGS" GO111MODULE=on \
-    go build -ldflags="${LDFLAGS} -linkmode=external" -a -o bin/ceph-volume-provider ./cmd/volumeprovider/main.go
+    go build -tags=ceph_luks_header_session -ldflags="${LDFLAGS} -linkmode=external" -a -o bin/ceph-volume-provider ./cmd/volumeprovider/main.go
 
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
@@ -200,8 +205,8 @@ USER 65532:65532
 ENTRYPOINT ["/ceph-volume-provider"]
 
 
-
-FROM distroless-base  AS ceph-bucket-provider
-COPY --from=ceph-bucket-provider-builder /workspace/bin/ceph-bucket-provider /ceph-bucket-provider
-USER 65532:65532
-ENTRYPOINT ["/ceph-bucket-provider"]
+#
+# FROM distroless-base  AS ceph-bucket-provider
+# COPY --from=ceph-bucket-provider-builder /workspace/bin/ceph-bucket-provider /ceph-bucket-provider
+# USER 65532:65532
+# ENTRYPOINT ["/ceph-bucket-provider"]

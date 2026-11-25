@@ -513,6 +513,9 @@ func (r *ImageReconciler) isImageExisting(ioCtx *rados.IOContext, imageID string
 func (r *ImageReconciler) updateImage(ctx context.Context, log logr.Logger, ioCtx *rados.IOContext, image *providerapi.Image) (err error) {
 	log.V(2).Info("Updating image")
 	img, err := openImage(ioCtx, ImageIDToRBDID(image.ID))
+
+	img.EncryptionLUKSHeaderOpen()
+
 	if err != nil {
 		return err
 	}

@@ -176,6 +176,7 @@ require (
 )
 
 replace (
+	github.com/ceph/go-ceph => github.com/Greenpepper15/go-ceph v0.0.0-20261125094626-128f3910d072
 	github.com/googleapis/gnostic => github.com/googleapis/gnostic v0.4.1
 	github.com/ironcore-dev/ironcore => github.com/gonzolino/ironcore v0.0.0-20261124190700-206f2c28c998
 	github.com/kubernetes-incubator/external-storage => github.com/libopenstorage/external-storage v0.20.4-openstorage-rc3
