@@ -74,8 +74,6 @@ func toPlatform(arch *string) *ocispec.Platform {
 func openImage(ioCtx *rados.IOContext, imageName string) (*librbd.Image, error) {
 	img, err := librbd.OpenImage(ioCtx, imageName, librbd.NoSnapshot)
 
-	img.EncryptionLUKSHeaderOpen()
-
 	if err != nil {
 		if !errors.Is(err, librbd.ErrNotFound) {
 			return nil, fmt.Errorf("failed to open image %s: %w", imageName, err)

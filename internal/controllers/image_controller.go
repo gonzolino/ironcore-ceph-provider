@@ -514,8 +514,6 @@ func (r *ImageReconciler) updateImage(ctx context.Context, log logr.Logger, ioCt
 	log.V(2).Info("Updating image")
 	img, err := openImage(ioCtx, ImageIDToRBDID(image.ID))
 
-	img.EncryptionLUKSHeaderOpen()
-
 	if err != nil {
 		return err
 	}
@@ -575,36 +573,27 @@ func (r *ImageReconciler) updateEncryptionHeader(ctx context.Context, image *pro
 	if image.Spec.Encryption == nil || image.Spec.Encryption.Type == "" || image.Spec.Encryption.Type == providerapi.EncryptionTypeUnencrypted || image.Status.Encryption.State != providerapi.EncryptionStateHeaderSet {
 		return false, nil
 	}
-	requestedPassphrase := image.Spec.Encryption.EncryptedPassphrase
-	currentPassphrases := image.Status.Encryption.Passphrases
 
-	requestedIndex := -1
-	for i, passphrase := range currentPassphrases {
-		if bytes.Equal(passphrase, requestedPassphrase) {
-			requestedIndex = i
-			break
-		}
+	requestedPassphrase, err := r.keyEncryption.Decrypt(image.Spec.Encryption.EncryptedPassphrase)
+	if err != nil {
+		return false, fmt.Errorf("failed to decrypt requested passphrase: %w", err)
 	}
-	if requestedIndex != -1 {
-		// requested passphrase is already set.
-		// TODO: Before removing passphrases from the status, they should be removed from the LUKS header.
-		if len(currentPassphrases) > 1 {
-			newPassphrases := [][]byte{requestedPassphrase}
-			image.Status.Encryption.Passphrases = newPassphrases
-			if _, err = r.images.Update(ctx, image); err != nil {
-				return false, fmt.Errorf("failed to update encryption passphrases of image: %w", err)
-			}
-			r.Eventf(image.Metadata, corev1.EventTypeNormal, "UpdatedEncryptionPassphrasesSucceeded", "UpdateEncryptionPassphrases", "Removed old encryption passphrases")
-			return true, nil
-		}
+	currentPassphrase, err := r.keyEncryption.Decrypt(image.Status.Encryption.Passphrase)
+	if err != nil {
+		return false, fmt.Errorf("failed to decrypt current passphrase: %w", err)
+	}
+
+	//img.EncryptionLUKSHeaderOpen()
+
+	if bytes.Equal(currentPassphrase, requestedPassphrase) {
 		return false, nil
 	}
 
-	image.Status.Encryption.Passphrases = append(currentPassphrases, requestedPassphrase)
+	image.Status.Encryption.Passphrase = requestedPassphrase
 	if _, err = r.images.Update(ctx, image); err != nil {
 		return false, fmt.Errorf("failed to update encryption passphrases of image: %w", err)
 	}
-	r.Eventf(image.Metadata, corev1.EventTypeNormal, "UpdatedEncryptionPassphrasesSucceeded", "UpdateEncryptionPassphrases", "Added new encryption passphrase")
+	r.Eventf(image.Metadata, corev1.EventTypeNormal, "UpdatedEncryptionPassphrasesSucceeded", "UpdateEncryptionPassphrases", "Updated encryption passphrase")
 	return true, nil
 }
 
@@ -786,8 +775,8 @@ func (r *ImageReconciler) setEncryptionHeader(ctx context.Context, log logr.Logg
 	}
 
 	image.Status.Encryption = providerapi.Encryption{
-		State:       providerapi.EncryptionStateHeaderSet,
-		Passphrases: [][]byte{encryptedPassphrase},
+		State:      providerapi.EncryptionStateHeaderSet,
+		Passphrase: encryptedPassphrase,
 	}
 	if _, err = r.images.Update(ctx, image); err != nil {
 		return fmt.Errorf("failed to update image encryption state: %w", err)

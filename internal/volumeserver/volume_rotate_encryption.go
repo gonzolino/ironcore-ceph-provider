@@ -25,14 +25,22 @@ func (s *Server) RotateVolumeEncryption(ctx context.Context, req *iri.RotateVolu
 		return nil, utils.ConvertInternalErrorToGRPC(fmt.Errorf("secret data with key %q missing", EncryptionSecretDataPassphraseKey))
 	}
 
-	encryptedPassphrase, err := s.keyEncryption.Encrypt(passphrase)
-	if err != nil {
-		return nil, utils.ConvertInternalErrorToGRPC(fmt.Errorf("failed to encrypt passphrase: %w", err))
-	}
-
 	image, err := s.imageStore.Get(ctx, req.VolumeId)
 	if err != nil {
 		return nil, utils.ConvertInternalErrorToGRPC(fmt.Errorf("failed to get image: %w", err))
+	}
+
+	currentPassphrase, err := s.keyEncryption.Decrypt(image.Spec.Encryption.EncryptedPassphrase)
+	if err != nil {
+		return nil, utils.ConvertInternalErrorToGRPC(fmt.Errorf("failed to decrypt current passphrase: %w", err))
+	}
+	if currentPassphrase != nil && string(currentPassphrase) == string(passphrase) {
+		log.V(1).Info("New passphrase is the same as the current one, no rotation needed")
+		return &iri.RotateVolumeEncryptionResponse{}, nil
+	}
+	encryptedPassphrase, err := s.keyEncryption.Encrypt(passphrase)
+	if err != nil {
+		return nil, utils.ConvertInternalErrorToGRPC(fmt.Errorf("failed to encrypt passphrase: %w", err))
 	}
 
 	image.Spec.Encryption = &api.EncryptionSpec{

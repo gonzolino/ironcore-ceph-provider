@@ -33,8 +33,8 @@ const (
 )
 
 type Encryption struct {
-	State       EncryptionState `json:"state"`
-	Passphrases [][]byte        `json:"passphrases"`
+	State      EncryptionState `json:"state"`
+	Passphrase []byte          `json:"passphrase"`
 }
 
 type EncryptionState string
