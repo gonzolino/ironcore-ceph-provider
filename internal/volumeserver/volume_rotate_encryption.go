@@ -35,6 +35,10 @@ func (s *Server) RotateVolumeEncryption(ctx context.Context, req *iri.RotateVolu
 		return nil, utils.ConvertInternalErrorToGRPC(fmt.Errorf("failed to get image: %w", err))
 	}
 
+	statusPassphrases := &image.Status.Encryption.Passphrases
+
+	*statusPassphrases = append(*statusPassphrases, image.Spec.Encryption.EncryptedPassphrase)
+
 	image.Spec.Encryption = &api.EncryptionSpec{
 		Type:                api.EncryptionTypeEncrypted,
 		EncryptedPassphrase: encryptedPassphrase,
