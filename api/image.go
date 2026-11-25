@@ -32,11 +32,10 @@ const (
 	ImageStateAvailable ImageState = "Available"
 )
 
-type EncryptionState string
-
-const (
-	EncryptionStateHeaderSet EncryptionState = "EncryptionHeaderSet"
-)
+type EncryptionState struct {
+	EncyptionStateHeaderSet string   `json:"header"`
+	Passphrases             [][]byte `json:"passphrases"`
+}
 
 type ImageSpec struct {
 	Size              uint64          `json:"size"`
