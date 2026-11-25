@@ -4,6 +4,7 @@
 package controllers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -523,28 +524,85 @@ func (r *ImageReconciler) updateImage(ctx context.Context, log logr.Logger, ioCt
 	}
 
 	requestedSize := round.OffBytes(image.Spec.Size)
+	if changed, err := r.updateImageSize(ctx, image, img, requestedSize); err != nil {
+		return fmt.Errorf("failed to update image size: %w", err)
+	} else if changed {
+		log.V(1).Info("Updated image", "requestedSize", requestedSize, "currentSize", currentImageSize)
+		return nil
+	}
+
+	if changed, err := r.updateEncryptionHeader(ctx, image); err != nil {
+		return fmt.Errorf("failed to update encryption header: %w", err)
+	} else if changed {
+		log.V(1).Info("Updated encryption header")
+		return nil
+	}
+
+	return nil
+}
+
+func (r *ImageReconciler) updateImageSize(ctx context.Context, image *providerapi.Image, img *librbd.Image, requestedSize uint64) (changed bool, err error) {
+	currentImageSize, err := img.GetSize()
+	if err != nil {
+		return false, fmt.Errorf("failed to get image size: %w", err)
+	}
 
 	switch {
 	case currentImageSize == requestedSize:
-		log.V(2).Info("No update needed: Old and new image size same")
-		return nil
+		return false, nil
 	case requestedSize < currentImageSize:
 		r.Eventf(image.Metadata, corev1.EventTypeWarning, "UpdateImageSizeFailed", "ResizeImage", "Image shrink not supported")
-		return fmt.Errorf("failed to shrink image: not supported")
+		return false, fmt.Errorf("failed to shrink image: not supported")
 	}
 
 	if err := img.Resize(requestedSize); err != nil {
 		r.Eventf(image.Metadata, corev1.EventTypeWarning, "UpdateImageSizeFailed", "ResizeImage", "Failed to resize image: %s", err)
-		return fmt.Errorf("failed to resize image: %w", err)
+		return false, fmt.Errorf("failed to resize image: %w", err)
 	}
 
 	image.Status.Size = requestedSize
 	if _, err = r.images.Update(ctx, image); err != nil {
-		return fmt.Errorf("failed to update size information of image: %w", err)
+		return false, fmt.Errorf("failed to update size information of image: %w", err)
 	}
 	r.Eventf(image.Metadata, corev1.EventTypeNormal, "UpdatedImageSizeSucceeded", "ResizeImage", "Updated image size. requestedSize: %d currentSize: %d", requestedSize, currentImageSize)
-	log.V(1).Info("Updated image", "requestedSize", requestedSize, "currentSize", currentImageSize)
-	return nil
+	return true, nil
+}
+
+func (r *ImageReconciler) updateEncryptionHeader(ctx context.Context, image *providerapi.Image) (changed bool, err error) {
+	if image.Spec.Encryption == nil || image.Spec.Encryption.Type == "" || image.Spec.Encryption.Type == providerapi.EncryptionTypeUnencrypted || image.Status.Encryption.State != providerapi.EncryptionStateHeaderSet {
+		return false, nil
+	}
+	requestedPassphrase := image.Spec.Encryption.EncryptedPassphrase
+	currentPassphrases := image.Status.Encryption.Passphrases
+
+	requestedIndex := -1
+	for i, passphrase := range currentPassphrases {
+		if bytes.Equal(passphrase, requestedPassphrase) {
+			requestedIndex = i
+			break
+		}
+	}
+	if requestedIndex != -1 {
+		// requested passphrase is already set.
+		// TODO: Before removing passphrases from the status, they should be removed from the LUKS header.
+		if len(currentPassphrases) > 1 {
+			newPassphrases := [][]byte{requestedPassphrase}
+			image.Status.Encryption.Passphrases = newPassphrases
+			if _, err = r.images.Update(ctx, image); err != nil {
+				return false, fmt.Errorf("failed to update encryption passphrases of image: %w", err)
+			}
+			r.Eventf(image.Metadata, corev1.EventTypeNormal, "UpdatedEncryptionPassphrasesSucceeded", "UpdateEncryptionPassphrases", "Removed old encryption passphrases")
+			return true, nil
+		}
+		return false, nil
+	}
+
+	image.Status.Encryption.Passphrases = append(currentPassphrases, requestedPassphrase)
+	if _, err = r.images.Update(ctx, image); err != nil {
+		return false, fmt.Errorf("failed to update encryption passphrases of image: %w", err)
+	}
+	r.Eventf(image.Metadata, corev1.EventTypeNormal, "UpdatedEncryptionPassphrasesSucceeded", "UpdateEncryptionPassphrases", "Added new encryption passphrase")
+	return true, nil
 }
 
 func (r *ImageReconciler) reconcileImage(ctx context.Context, id string) error {
@@ -700,12 +758,13 @@ func (r *ImageReconciler) setWWN(log logr.Logger, ioCtx *rados.IOContext, image 
 }
 
 func (r *ImageReconciler) setEncryptionHeader(ctx context.Context, log logr.Logger, ioCtx *rados.IOContext, image *providerapi.Image) error {
-	if image.Spec.Encryption == nil || image.Spec.Encryption.Type == "" || image.Spec.Encryption.Type == providerapi.EncryptionTypeUnencrypted || image.Status.Encryption == providerapi.EncryptionStateHeaderSet {
+	if image.Spec.Encryption == nil || image.Spec.Encryption.Type == "" || image.Spec.Encryption.Type == providerapi.EncryptionTypeUnencrypted || image.Status.Encryption.State == providerapi.EncryptionStateHeaderSet {
 		return nil
 	}
 
 	log.V(1).Info("Configuring encryption")
-	passphrase, err := r.keyEncryption.Decrypt(image.Spec.Encryption.EncryptedPassphrase)
+	encryptedPassphrase := image.Spec.Encryption.EncryptedPassphrase
+	passphrase, err := r.keyEncryption.Decrypt(encryptedPassphrase)
 	if err != nil {
 		return fmt.Errorf("failed to decrypt passphrase: %w", err)
 	}
@@ -723,7 +782,10 @@ func (r *ImageReconciler) setEncryptionHeader(ctx context.Context, log logr.Logg
 		return fmt.Errorf("failed to set encryption format: %w", err)
 	}
 
-	image.Status.Encryption = providerapi.EncryptionStateHeaderSet
+	image.Status.Encryption = providerapi.Encryption{
+		State:       providerapi.EncryptionStateHeaderSet,
+		Passphrases: [][]byte{encryptedPassphrase},
+	}
 	if _, err = r.images.Update(ctx, image); err != nil {
 		return fmt.Errorf("failed to update image encryption state: %w", err)
 	}
