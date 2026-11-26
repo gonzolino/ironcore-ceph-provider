@@ -20,6 +20,7 @@ import (
 	"github.com/go-logr/logr"
 	providerapi "github.com/ironcore-dev/ceph-provider/api"
 	"github.com/ironcore-dev/ceph-provider/internal/encryption"
+	"github.com/ironcore-dev/ceph-provider/internal/luksheader"
 	"github.com/ironcore-dev/ceph-provider/internal/round"
 	"github.com/ironcore-dev/ceph-provider/internal/utils"
 	"github.com/ironcore-dev/ironcore-image/oci/remote"
@@ -532,7 +533,7 @@ func (r *ImageReconciler) updateImage(ctx context.Context, log logr.Logger, ioCt
 		return nil
 	}
 
-	if changed, err := r.updateEncryptionHeader(ctx, image); err != nil {
+	if changed, err := r.updateEncryptionHeader(ctx, image, img); err != nil {
 		return fmt.Errorf("failed to update encryption header: %w", err)
 	} else if changed {
 		log.V(1).Info("Updated encryption header")
@@ -569,7 +570,7 @@ func (r *ImageReconciler) updateImageSize(ctx context.Context, image *providerap
 	return true, nil
 }
 
-func (r *ImageReconciler) updateEncryptionHeader(ctx context.Context, image *providerapi.Image) (changed bool, err error) {
+func (r *ImageReconciler) updateEncryptionHeader(ctx context.Context, image *providerapi.Image, img *librbd.Image) (changed bool, err error) {
 	if image.Spec.Encryption == nil || image.Spec.Encryption.Type == "" || image.Spec.Encryption.Type == providerapi.EncryptionTypeUnencrypted || image.Status.Encryption.State != providerapi.EncryptionStateHeaderSet {
 		return false, nil
 	}
@@ -583,13 +584,16 @@ func (r *ImageReconciler) updateEncryptionHeader(ctx context.Context, image *pro
 		return false, fmt.Errorf("failed to decrypt current passphrase: %w", err)
 	}
 
-	//img.EncryptionLUKSHeaderOpen()
-
 	if bytes.Equal(currentPassphrase, requestedPassphrase) {
 		return false, nil
 	}
 
-	image.Status.Encryption.Passphrase = requestedPassphrase
+	err = luksheader.Rotate(img, requestedPassphrase, currentPassphrase)
+	if err != nil {
+		return false, fmt.Errorf("failed to rotate LUKS header: %w", err)
+	}
+
+	image.Status.Encryption.Passphrase = image.Spec.Encryption.EncryptedPassphrase
 	if _, err = r.images.Update(ctx, image); err != nil {
 		return false, fmt.Errorf("failed to update encryption passphrases of image: %w", err)
 	}

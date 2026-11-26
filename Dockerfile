@@ -12,7 +12,7 @@ Suites: bookworm
 Components: main
 Signed-By: /usr/share/keyrings/ceph-release.asc
 EOF
-RUN apt-get update && apt-get install -y libcephfs-dev librbd-dev librados-dev libc-bin
+RUN apt-get update && apt-get install -y libcephfs-dev librbd-dev librados-dev libc-bin libcryptsetup-dev
 
 # Build the manager binary
 FROM --platform=$BUILDPLATFORM golang:1.27.4-bookworm AS builder
